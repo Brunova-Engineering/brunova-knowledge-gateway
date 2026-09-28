@@ -44,7 +44,7 @@ from app.agent_signals import (
     SignalStatus,
 )
 from app.artifact_refs import ArtifactReferenceCodec
-from app.openwa_approval import validate_reference
+from app.openwa_approval import reference_for_confirmed_operation, validate_reference
 from app.audit import correlation_id, emit_audit_record
 from app.auth.principals import (
     CapabilityScope,
@@ -292,6 +292,10 @@ class HubSpotToolListResult(BaseModel):
     request_id: str
 
 
+class OpenWAApprovalReferenceToolResult(BaseModel):
+    approval_reference: str
+
+
 class BrunovaMCPServer(MCPServer):
     """MCP server that projects provider-curated live downstream catalogs."""
 
@@ -334,9 +338,10 @@ class BrunovaMCPServer(MCPServer):
                     description=(
                         (descriptor.description or "")
                         + (" For writes, verify explicit human confirmation for this exact operation; "
-                           "generate a bounded owa1 approval_reference linked to the current thread and "
-                           "confirming request. Send it in MCP params._meta.approval_reference, or use "
-                           "the approval_reference argument if the client cannot set call metadata. "
+                           "call openwa_prepare_approval_reference with the actual conversation and "
+                           "confirming human request references, exact downstream tool and final arguments. "
+                           "Copy its bounded owa1 result into the REQUIRED approval_reference argument "
+                           "(or MCP params._meta.approval_reference for metadata-capable clients). "
                            "Never ask the human to supply the identifier or infer consent from a draft."
                            if descriptor.tier == "write" else "")
                     ),
@@ -344,7 +349,10 @@ class BrunovaMCPServer(MCPServer):
                         {**descriptor.input_schema,
                          "properties": {**descriptor.input_schema.get("properties", {}),
                                         "approval_reference": {"type": "string",
-                                            "description": "Agent-generated bounded reference to explicit human confirmation; gateway metadata only, never sent to OpenWA."}}}
+                                            "description": "Required bounded owa1 reference from openwa_prepare_approval_reference; gateway metadata only, never sent to OpenWA."}},
+                         "required": list(dict.fromkeys([
+                             *descriptor.input_schema.get("required", []), "approval_reference"
+                         ]))}
                         if descriptor.tier == "write" else descriptor.input_schema
                     ),
                     annotations=descriptor.annotations or None,
@@ -387,7 +395,9 @@ class BrunovaMCPServer(MCPServer):
                 is_error=True,
             )
         is_n8n = name.startswith("n8n_") and name not in {"n8n_status", "n8n_list_tools"}
-        is_openwa = name.startswith("openwa_") and name not in {"openwa_status", "openwa_list_tools"}
+        is_openwa = name.startswith("openwa_") and name not in {
+            "openwa_status", "openwa_list_tools", "openwa_prepare_approval_reference"
+        }
         if not is_n8n and not is_openwa:
             if name in ACQUISITION_TOOLS:
                 try:
@@ -692,7 +702,7 @@ def _approval_reference(context: Context | None) -> str | None:
 
 mcp_server = BrunovaMCPServer(
     name="brunova-knowledge-gateway",
-    version="0.30.0",
+    version="0.30.1",
     instructions=(
         "Use only the capabilities and sources exposed in this authenticated "
         "principal's tool catalog. Mutations remain capability-gated and keep "
@@ -2601,6 +2611,35 @@ async def n8n_list_tools(ctx: Context) -> N8NToolListResult:
             duration_ms=round((time.monotonic() - started) * 1000),
         )
         raise RuntimeError(f"{code}: n8n MCP catalog is unavailable") from error
+
+
+@mcp_server.tool()
+async def openwa_prepare_approval_reference(
+    thread_id: str,
+    confirmation_id: str,
+    tool: str,
+    arguments: dict[str, Any],
+    ctx: Context,
+) -> OpenWAApprovalReferenceToolResult:
+    """Bind an already approved OpenWA write to its exact payload, without sending it.
+
+    Use real conversation and confirming human request references. If the host
+    does not expose opaque IDs, identify the actual conversation and request
+    precisely; do not invent an approval or ask the human for technical IDs.
+    A draft or a different recipient/content is not confirmation. This tool
+    computes a correlation value only; Gateway still checks the write.
+    """
+
+    try:
+        descriptors = await get_openwa_client().list_tools()
+        if not any(item.name == tool and item.tier == "write" for item in descriptors):
+            raise ValueError("unknown OpenWA write tool")
+        reference = reference_for_confirmed_operation(
+            thread_id, confirmation_id, tool, arguments
+        )
+    except (ValueError, TypeError) as error:
+        raise RuntimeError("openwa_approval_input_invalid: exact write provenance and arguments required") from error
+    return OpenWAApprovalReferenceToolResult(approval_reference=reference)
 
 
 @mcp_server.tool()

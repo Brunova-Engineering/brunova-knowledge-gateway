@@ -1057,8 +1057,14 @@ de OpenWA no afecta Workspace, HubSpot, n8n ni `/health`.
 
 Las anotaciones downstream son la clasificación autoritativa. Las tools con
 `readOnlyHint=true` se ejecutan como lecturas. Cualquier otra tool se trata como
-escritura y requiere una `approval_reference` externa válida en metadata MCP;
-esa referencia se audita, pero los argumentos, cuerpos de mensajes, media,
+escritura y requiere una `approval_reference` externa válida. El catálogo exige
+el argumento `approval_reference` en cada write para hosts que solo envían
+argumentos; un cliente MCP capaz de enviar `params._meta.approval_reference`
+también conserva esa ruta. `openwa_prepare_approval_reference` es una tool
+sin efecto externo que calcula el formato acotado `owa1` desde la conversación,
+el request humano confirmatorio y el payload final. No crea aprobación: el
+Management Agent debe identificar primero la instrucción humana explícita.
+La referencia se audita, pero los argumentos, cuerpos de mensajes, media,
 respuestas completas, URL y credenciales no se registran. El Gateway no añade
 un proxy REST ni una segunda allowlist de operaciones OpenWA.
 

@@ -93,7 +93,7 @@ def test_mcp_transport_is_protected(ephemeral_gateway_token):
     assert rejected.status_code == 401
     assert rejected.json() == {"error": "missing_authentication"}
     assert accepted.status_code == 200
-    assert accepted.json()["result"]["serverInfo"]["version"] == "0.30.0"
+    assert accepted.json()["result"]["serverInfo"]["version"] == "0.30.1"
 
 
 def test_authentication_audit_never_receives_authorization_value(

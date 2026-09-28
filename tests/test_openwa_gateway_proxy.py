@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 from mcp import Client
 
@@ -74,6 +75,8 @@ def test_management_projects_catalog_and_governs_write_without_auditing_body(mon
 
     assert projected["openwa_MessageHistory"].input_schema["required"] == ["sessionId"]
     assert projected["openwa_MessageSendText"].meta["approval_reference_required"] is True
+    assert "approval_reference" in projected["openwa_MessageSendText"].input_schema["required"]
+    assert "openwa_prepare_approval_reference" in {tool.name for tool in catalog.tools}
     assert read.is_error is False
     assert denied.is_error is True
     assert "openwa_approval_required" in denied.content[0].text
@@ -82,6 +85,37 @@ def test_management_projects_catalog_and_governs_write_without_auditing_body(mon
     assert all("private-message-body" not in repr(event) for event in audits)
     assert audits[-1]["provider"] == "openwa"
     assert audits[-1]["approval_reference"] == reference
+
+
+def test_voice_compatible_approval_tool_binds_exact_send_without_downstream_effect(monkeypatch):
+    fake = FakeOpenWAClient()
+    monkeypatch.setattr(mcp_module, "get_openwa_client", lambda: fake)
+    payload = {"sessionId": "safe-session", "chatId": "safe-chat", "text": "private-body"}
+
+    async def scenario():
+        async with Client(mcp_module.mcp_server) as client:
+            prepared = await client.call_tool("openwa_prepare_approval_reference", {
+                "thread_id": "actual-conversation-reference",
+                "confirmation_id": "actual-human-request-reference",
+                "tool": "MessageSendText",
+                "arguments": payload,
+            })
+            assert not prepared.is_error
+            reference = json.loads(prepared.content[0].text)["approval_reference"]
+            assert reference == reference_for_confirmed_operation(
+                "actual-conversation-reference", "actual-human-request-reference",
+                "MessageSendText", payload,
+            )
+            assert fake.calls == []
+            written = await client.call_tool(
+                "openwa_MessageSendText", {**payload, "approval_reference": reference}
+            )
+            assert not written.is_error
+            return reference
+
+    reference = asyncio.run(scenario())
+    assert reference.startswith("owa1:")
+    assert fake.calls == [("MessageSendText", payload)]
 
 
 def test_provider_discovery_failures_are_isolated(monkeypatch):

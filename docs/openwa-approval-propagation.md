@@ -83,3 +83,21 @@ without traffic, then promoted to 100% after readiness. Subsequent native MCP
 requirement above is complete; real delivery verification remains the human's
 trial. Existing host sessions may need to reload the catalog to discover the
 new argument. Existing local Acquisition edits were preserved and not deployed.
+
+## Voice regression follow-up — 2026-09-28
+
+Production Gateway audit recorded three `MessageSendText` rejections at
+18:04:03, 18:04:33 and 18:28:30 UTC with `openwa_approval_required`. No
+successful send was recorded for those attempts. This establishes that the
+voice path did not supply a valid bounded reference; the audit deliberately
+contains no recipient or message body. Panky CLI 0.6.5 could compute the
+reference locally, but an MCP-only voice surface did not call that CLI helper.
+
+The model-facing OpenWA write schema now requires the `approval_reference`
+argument and names `openwa_prepare_approval_reference` as the available MCP
+preparation tool. The preparation tool binds an actual conversation/request
+reference, downstream tool and final arguments; it neither sends a message nor
+approves one. Metadata-capable callers can still provide the same reference in
+MCP `_meta`. The Gateway's existing scope validation and fail-closed write gate
+remain unchanged. The full test suite uses fake downstream OpenWA, so live voice
+delivery still requires a fresh-session canary after deployment.

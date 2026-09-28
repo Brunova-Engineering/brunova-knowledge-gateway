@@ -20,8 +20,10 @@ def reference_for_confirmed_operation(thread_id: str, confirmation_id: str,
                                       tool: str, arguments: dict[str, Any]) -> str:
     """Call ONLY after the agent verifies explicit consent for this exact operation.
 
-    IDs identify the actual conversation and confirming turn/request. This helper
-    encodes provenance and scope, not evidence of consent or an authorization grant.
+    Inputs identify the actual conversation and confirming human turn/request.
+    Prefer host IDs; a precise visible conversation/request reference is valid
+    when opaque IDs are unavailable. This helper encodes agent-attested provenance
+    and scope, not independent proof of consent or an authorization grant.
     """
     if not thread_id.strip() or not confirmation_id.strip():
         raise ValueError("Approval requires conversation and confirmation provenance")

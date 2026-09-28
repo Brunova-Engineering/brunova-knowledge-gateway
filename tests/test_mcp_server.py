@@ -603,6 +603,7 @@ def test_mcp_exposes_only_governed_tools(monkeypatch):
             "n8n_list_tools",
             "openwa_status",
             "openwa_list_tools",
+            "openwa_prepare_approval_reference",
             "list_agent_signals",
             "get_agent_signal",
             "claim_agent_signal",
@@ -1269,7 +1270,7 @@ def test_developer_spreadsheet_lifecycle_and_tool_filtering(monkeypatch):
 
     names = {tool.name for tool in tools.tools}
     assert {"inspect_spreadsheet_structure", "edit_source_spreadsheet", "validate_spreadsheet_structure", "convert_source_artifact"} <= names
-    assert {"delete_source_artifact", "share_source_artifact", "hubspot_list_tools", "n8n_status", "openwa_status", "list_agent_signals"}.isdisjoint(names)
+    assert {"delete_source_artifact", "share_source_artifact", "hubspot_list_tools", "n8n_status", "openwa_status", "openwa_prepare_approval_reference", "list_agent_signals"}.isdisjoint(names)
     assert created.is_error is False
     assert created.structured_content["artifact"]["type"] == "spreadsheet"
     assert inspected.is_error is False
