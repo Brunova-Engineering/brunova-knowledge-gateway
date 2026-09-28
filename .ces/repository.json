@@ -1,0 +1,30 @@
+{
+  "bootstrap": "HEALTHY",
+  "enabled_at": 1790538487,
+  "evidence": [
+    "app/config/settings.py",
+    "app/adapters/google_workspace/models.py",
+    "requirements.txt",
+    "docs/sheets-validation-production-proof.md",
+    "docs/openwa-approval-propagation.md",
+    "tests/test_signal_lifecycle_policy.py",
+    "tests/conftest.py",
+    "docs/adr/0001-google-sheets-native-images.md",
+    "app/main.py",
+    "app/spreadsheet_production.py",
+    "app/policies/source_access.py",
+    "app/source_proposal_store.py",
+    "app/adapters/hubspot/token_store.py",
+    "app/adapters/google_workspace/validation.py",
+    "app/adapters/hubspot/mcp_client.py",
+    "app/adapters/hubspot/oauth.py",
+    "Dockerfile",
+    "app/adapters/n8n/config.py",
+    "app/adapters/hubspot/models.py",
+    "tests/test_errors.py"
+  ],
+  "id": "5757abbe-34d9-446d-bc2a-238663384fd9",
+  "ledger_schema": 1,
+  "schema": 1,
+  "trust": "GENERATED"
+}

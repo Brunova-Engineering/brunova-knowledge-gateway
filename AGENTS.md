@@ -1,0 +1,3 @@
+<!-- CES:BEGIN -->
+CES applies only when `ces activation . --json` reports READY. Otherwise ignore this section. Read only relevant `.ces/knowledge/` files: architecture, conventions, decisions, glossary, workflow, known-errors. When this task confirms a durable project change, update only its affected ledger file now; ordinary edits need no ledger work. BRAIN stays root. For substantial bounded mechanical work, resolve WORKER with `ces models resolve WORKER --repo . --json` and pass its spawn fields to native `spawn_agent`; review and validate its result. Handle tiny tasks directly.
+<!-- CES:END -->
