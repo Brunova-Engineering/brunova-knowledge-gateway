@@ -75,7 +75,8 @@ def test_management_projects_catalog_and_governs_write_without_auditing_body(mon
 
     assert projected["openwa_MessageHistory"].input_schema["required"] == ["sessionId"]
     assert projected["openwa_MessageSendText"].meta["approval_reference_required"] is True
-    assert "approval_reference" in projected["openwa_MessageSendText"].input_schema["required"]
+    assert "approval_evidence" in projected["openwa_MessageSendText"].input_schema["required"]
+    assert "approval_reference" not in projected["openwa_MessageSendText"].input_schema["properties"]
     assert "openwa_prepare_approval_reference" in {tool.name for tool in catalog.tools}
     assert read.is_error is False
     assert denied.is_error is True
@@ -116,6 +117,37 @@ def test_voice_compatible_approval_tool_binds_exact_send_without_downstream_effe
     reference = asyncio.run(scenario())
     assert reference.startswith("owa1:")
     assert fake.calls == [("MessageSendText", payload)]
+
+
+def test_inline_human_evidence_is_bound_server_side_and_not_forwarded(monkeypatch):
+    fake = FakeOpenWAClient()
+    audits = []
+    monkeypatch.setattr(mcp_module, "get_openwa_client", lambda: fake)
+    monkeypatch.setattr(mcp_module, "emit_audit_record", lambda **kw: audits.append(kw))
+    payload = {"sessionId": "safe-session", "chatId": "safe-chat", "text": "private-body"}
+    evidence = {"conversation_ref": "visible conversation 42",
+                "human_request_ref": "human requested this exact message at 12:28"}
+
+    async def scenario():
+        async with Client(mcp_module.mcp_server) as client:
+            invalid = await client.call_tool("openwa_MessageSendText", {
+                **payload, "approval_evidence": {"conversation_ref": "made-up"}})
+            assert invalid.is_error and "openwa_approval_required" in invalid.content[0].text
+            conflict = await client.call_tool("openwa_MessageSendText", {
+                **payload, "approval_evidence": evidence,
+                "approval_reference": "owa1:invalid"})
+            assert conflict.is_error and "openwa_approval_conflict" in conflict.content[0].text
+            written = await client.call_tool("openwa_MessageSendText", {
+                **payload, "approval_evidence": evidence})
+            assert not written.is_error
+
+    asyncio.run(scenario())
+    assert fake.calls == [("MessageSendText", payload)]
+    assert audits[-1]["approval_reference"] == reference_for_confirmed_operation(
+        evidence["conversation_ref"], evidence["human_request_ref"],
+        "MessageSendText", payload)
+    assert all("private-body" not in repr(event) and "human requested" not in repr(event)
+               for event in audits)
 
 
 def test_provider_discovery_failures_are_isolated(monkeypatch):

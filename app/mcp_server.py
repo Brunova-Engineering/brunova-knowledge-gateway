@@ -337,21 +337,30 @@ class BrunovaMCPServer(MCPServer):
                     name=exposed_name,
                     description=(
                         (descriptor.description or "")
-                        + (" For writes, verify explicit human confirmation for this exact operation; "
-                           "call openwa_prepare_approval_reference with the actual conversation and "
-                           "confirming human request references, exact downstream tool and final arguments. "
-                           "Copy its bounded owa1 result into the REQUIRED approval_reference argument "
-                           "(or MCP params._meta.approval_reference for metadata-capable clients). "
-                           "Never ask the human to supply the identifier or infer consent from a draft."
+                        + (" For writes, verify explicit human authorization for this exact operation. "
+                           "Supply approval_evidence with the actual conversation reference and the "
+                           "human request that authorized this send. The Gateway binds that provenance "
+                           "to the exact tool and arguments. Never invent a technical approval token, "
+                           "ask the human for an identifier, or infer consent from a draft."
                            if descriptor.tier == "write" else "")
                     ),
                     input_schema=(
                         {**descriptor.input_schema,
                          "properties": {**descriptor.input_schema.get("properties", {}),
-                                        "approval_reference": {"type": "string",
-                                            "description": "Required bounded owa1 reference from openwa_prepare_approval_reference; gateway metadata only, never sent to OpenWA."}},
+                                        "approval_evidence": {
+                                            "type": "object",
+                                            "description": "Agent-attested reference to the explicit human instruction authorizing this exact operation; gateway metadata only, never sent to OpenWA.",
+                                            "properties": {
+                                                "conversation_ref": {"type": "string", "minLength": 1, "maxLength": 512,
+                                                    "description": "Actual conversation/thread reference. Use a precise visible reference if the host provides no opaque ID."},
+                                                "human_request_ref": {"type": "string", "minLength": 1, "maxLength": 512,
+                                                    "description": "Actual human turn/request authorizing this exact send, not an assistant draft."},
+                                            },
+                                            "required": ["conversation_ref", "human_request_ref"],
+                                            "additionalProperties": False,
+                                        }},
                          "required": list(dict.fromkeys([
-                             *descriptor.input_schema.get("required", []), "approval_reference"
+                             *descriptor.input_schema.get("required", []), "approval_evidence"
                          ]))}
                         if descriptor.tier == "write" else descriptor.input_schema
                     ),
@@ -496,19 +505,38 @@ class BrunovaMCPServer(MCPServer):
                     404,
                 )
             if descriptor.tier == "write":
-                # Compatibility for argument-only MCP hosts. Both channels enter the
-                # same approval gate; governance metadata never reaches downstream.
+                # The model supplies provenance, while the Gateway constructs the
+                # bounded reference from the exact downstream operation. Legacy
+                # metadata/argument references remain valid for existing clients.
                 arguments = dict(arguments)
+                evidence = arguments.pop("approval_evidence", None)
                 argument_reference = arguments.pop("approval_reference", None)
                 if (metadata_reference is not None and argument_reference is not None
                         and metadata_reference != argument_reference):
                     raise WorkspaceAdapterError(
                         "openwa_approval_conflict", "Conflicting approval metadata.", 403
                     )
-                approval_reference = validate_reference(
-                    metadata_reference if metadata_reference is not None else argument_reference,
-                    descriptor.name, arguments,
-                )
+                direct_reference = (metadata_reference if metadata_reference is not None
+                                    else argument_reference)
+                if evidence is not None:
+                    if (not isinstance(evidence, dict)
+                            or set(evidence) != {"conversation_ref", "human_request_ref"}
+                            or any(not isinstance(evidence[key], str)
+                                   or not 1 <= len(evidence[key].strip()) <= 512
+                                   for key in ("conversation_ref", "human_request_ref"))):
+                        raise WorkspaceAdapterError(
+                            "openwa_approval_required", "Valid human approval evidence is required.", 403
+                        )
+                    derived_reference = reference_for_confirmed_operation(
+                        evidence["conversation_ref"], evidence["human_request_ref"],
+                        descriptor.name, arguments,
+                    )
+                    if direct_reference is not None and direct_reference != derived_reference:
+                        raise WorkspaceAdapterError(
+                            "openwa_approval_conflict", "Conflicting approval metadata.", 403
+                        )
+                    direct_reference = derived_reference
+                approval_reference = validate_reference(direct_reference, descriptor.name, arguments)
             result = await client.call_tool(descriptor.name, arguments)
             downstream_failed = bool(result.get("isError", False)) if isinstance(result, dict) else False
             emit_audit_record(
