@@ -101,3 +101,13 @@ approves one. Metadata-capable callers can still provide the same reference in
 MCP `_meta`. The Gateway's existing scope validation and fail-closed write gate
 remain unchanged. The full test suite uses fake downstream OpenWA, so live voice
 delivery still requires a fresh-session canary after deployment.
+
+Production rollout: commit `23321e7` was built as image digest
+`sha256:71c754852f6745cae74d8513195acb7ee491f3e9a976336120ffe82f51edf9dc`
+and deployed to Cloud Run revision `brunova-knowledge-gateway-00112-daj`.
+The revision became healthy before receiving 100% traffic. A real authenticated
+MCP `tools/list` showed server v0.30.1, the preparation tool and a required
+approval argument on `openwa_MessageSendText`; a synthetic preparation call
+returned `owa1` without invoking an OpenWA write. No real WhatsApp message was
+sent by this rollout. The fresh voice-session send/readback remains the final
+interface acceptance check.
