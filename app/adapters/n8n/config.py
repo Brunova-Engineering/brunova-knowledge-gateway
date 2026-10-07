@@ -18,10 +18,10 @@ class N8NMCPConfig:
     environment: dict[str, str] = field(default_factory=dict, repr=False)
 
     @classmethod
-    def from_environment(cls) -> "N8NMCPConfig":
-        raw = os.getenv("N8N_MCP_JSON", "")
+    def from_environment(cls, variable: str = "N8N_MCP_JSON") -> "N8NMCPConfig":
+        raw = os.getenv(variable, "")
         if not raw.strip():
-            raise ValueError("N8N_MCP_JSON must be injected from Secret Manager")
+            raise ValueError("n8n MCP configuration must be injected from Secret Manager")
         return cls.from_json(raw)
 
     @classmethod
