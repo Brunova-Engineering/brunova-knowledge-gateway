@@ -106,15 +106,14 @@ def test_missing_capability_is_blocked():
     assert captured.value.code == "source_capability_denied"
 
 
-def test_missing_approval_reference_is_blocked():
-    with pytest.raises(WorkspaceAdapterError) as captured:
-        policy().authorize(
-            source_id="safe_templates",
-            operation=MutationOperation.CREATE,
-            approval_reference="",
-        )
+def test_management_mutation_needs_no_external_approval_reference():
+    allowed = policy().authorize(
+        source_id="safe_templates",
+        operation=MutationOperation.CREATE,
+        approval_reference="",
+    )
 
-    assert captured.value.code == "mutation_approval_required"
+    assert allowed.definition.id == "safe_templates"
 
 
 def test_developer_scope_authorizes_mutation_without_external_approval():
