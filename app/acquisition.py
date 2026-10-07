@@ -35,6 +35,7 @@ TOOLS = frozenset({
     "acquisition_get_operating_model",
     "acquisition_get_activation_preflight",
     "acquisition_get_discovery",
+    "acquisition_prepare_conversation",
     "acquisition_request_discovery_planning",
     "acquisition_request_authenticated_research",
     "acquisition_record_commercial_calibration",
@@ -114,6 +115,17 @@ def register_acquisition_tools(server: Any) -> None:
     async def acquisition_get_discovery() -> CallToolResult:
         """Inspect authoritative Discovery planning, source health/yield and durable candidates BEFORE Account admission. Explain what was observed, unresolved identity, missing evidence and pending work; identity is not qualification. Counts and bounded displayed samples differ. Source failure/empty results do not prove absence of market opportunity. No company list is needed to begin an authorized active Cycle; no activation or provider action occurs here."""
         return await portal_request("GET", "/discovery")
+
+    @server.tool()
+    async def acquisition_prepare_conversation(command_id: Identifier, objective_reference: Identifier,
+            cycle_id: Identifier, candidate_id: Identifier, expected_version: Annotated[int, Field(ge=0)],
+            evidence_observation_ids: Annotated[list[str], Field(min_length=1, max_length=6)],
+            proposal: dict[str, Any]) -> CallToolResult:
+        """Record Pancracio's evidence-bound, versioned Candidate conversation preparation. Read Discovery and its observation IDs first. The proposal must contain bounded signalKind, hypothesis, unknowns, question, subject, message, alternative economic positions, chosenPosition, claims and feedbackConsideration; Engine validates each field and exact provenance. An admitted DISCOVERY_CONTROL objective must bind the exact request. Human feedback is optional, and Pancracio decides any later governed step. This creates no Account, CRM, outbound intent, provider action or effect authorization."""
+        return await management("DISCOVERY_CONTROL", command_id, objective_reference, {
+            "operation": "PREPARE_CONVERSATION", "cycleId": cycle_id, "candidateId": candidate_id,
+            "expectedVersion": expected_version, "evidenceObservationIds": evidence_observation_ids,
+            "proposal": proposal})
 
     @server.tool()
     async def acquisition_archive_candidate(command_id: Identifier, objective_reference: Identifier,
