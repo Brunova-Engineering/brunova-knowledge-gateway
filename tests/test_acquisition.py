@@ -218,6 +218,7 @@ def test_management_capability_objective_provenance_and_worker_boundary(monkeypa
 def test_all_management_tools_forward_only_narrow_contract(monkeypatch):
     cases = [
         ('acquisition_prepare_conversation', 'DISCOVERY_CONTROL', dict(cycle_id='c',candidate_id='candidate-1',expected_version=0,evidence_observation_ids=['observation-1'],proposal={'signalKind':'OTHER','hypothesis':'Synthetic evidence-bound hypothesis.'})),
+        ('acquisition_bind_candidate_message', 'DISCOVERY_CONTROL', dict(proposal_id='proposal-1',expected_buyer_result_id='buyer-1',expected_message_version=1)),
         ('acquisition_archive_candidate', 'DISCOVERY_CONTROL', dict(candidate_id='candidate-1',reason='Remove from the active workspace while preserving evidence.')),
         ('acquisition_restore_candidate', 'DISCOVERY_CONTROL', dict(candidate_id='candidate-1',reason='Return to the active workspace for bounded review.')),
         ('acquisition_request_authenticated_research', 'DISCOVERY_CONTROL', dict(cycle_id='c',policy_hash='a'*64,uri='https://www.linkedin.com/feed/',surface='LINKEDIN',evidence_expected='Authenticated feed navigation is rendered read-only.')),

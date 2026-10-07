@@ -35,7 +35,7 @@ TOOLS = frozenset({
     "acquisition_get_operating_model",
     "acquisition_get_activation_preflight",
     "acquisition_get_discovery",
-    "acquisition_prepare_conversation",
+    "acquisition_prepare_conversation", "acquisition_bind_candidate_message",
     "acquisition_request_discovery_planning",
     "acquisition_request_authenticated_research",
     "acquisition_record_commercial_calibration",
@@ -126,6 +126,16 @@ def register_acquisition_tools(server: Any) -> None:
             "operation": "PREPARE_CONVERSATION", "cycleId": cycle_id, "candidateId": candidate_id,
             "expectedVersion": expected_version, "evidenceObservationIds": evidence_observation_ids,
             "proposal": proposal})
+
+    @server.tool()
+    async def acquisition_bind_candidate_message(command_id: Identifier, objective_reference: Identifier,
+            proposal_id: Identifier, expected_buyer_result_id: Identifier,
+            expected_message_version: Annotated[int, Field(ge=1)]) -> CallToolResult:
+        """Bind Pancracio's current evidence-bound Candidate proposal to the exact current Buyer/Message state under an admitted DISCOVERY_CONTROL objective. The Engine validates safe copy and persists an immutable Message version and proposal binding. Current implementation is restricted to the disposable synthetic CRM laboratory; it creates no effect, provider call or wake."""
+        return await management("DISCOVERY_CONTROL", command_id, objective_reference, {
+            "operation": "BIND_CANDIDATE_MESSAGE", "proposalId": proposal_id,
+            "expectedBuyerResultId": expected_buyer_result_id,
+            "expectedMessageVersion": expected_message_version})
 
     @server.tool()
     async def acquisition_archive_candidate(command_id: Identifier, objective_reference: Identifier,
