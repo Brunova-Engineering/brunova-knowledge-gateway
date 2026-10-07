@@ -54,6 +54,8 @@ class DeveloperPrincipalRecord(BaseModel):
     providers: ProviderScope
     sources: frozenset[str] = Field(min_length=1)
     capabilities: CapabilityScope
+    # Exact downstream tool names per instance. Provider access alone grants none.
+    n8n_tools: dict[str, frozenset[str]] = Field(default_factory=dict)
     expires_at: datetime | None = None
     metadata: dict[str, str] = Field(default_factory=dict)
 
@@ -62,6 +64,22 @@ class DeveloperPrincipalRecord(BaseModel):
     def expiration_must_include_timezone(cls, value: datetime | None) -> datetime | None:
         if value is not None and value.tzinfo is None:
             raise ValueError("expires_at must include a timezone")
+        return value
+
+    @field_validator("n8n_tools")
+    @classmethod
+    def n8n_grants_must_be_explicit(
+        cls, value: dict[str, frozenset[str]]
+    ) -> dict[str, frozenset[str]]:
+        import re
+
+        if any(
+            not re.fullmatch(r"[a-z][a-z0-9_-]{1,63}", instance_id)
+            or not names
+            or any(not name.strip() or name != name.strip() for name in names)
+            for instance_id, names in value.items()
+        ):
+            raise ValueError("n8n grants require valid instances and exact tool names")
         return value
 
 
@@ -120,6 +138,7 @@ class Principal:
     providers: ProviderScope
     sources: frozenset[str] | None
     capabilities: CapabilityScope
+    n8n_tools: dict[str, frozenset[str]] | None = None
     signal_types: frozenset[str] = frozenset()
     signal_operations: frozenset[str] = frozenset()
     expires_at: datetime | None = None
@@ -143,6 +162,7 @@ class Principal:
                 share=True,
                 convert=True,
             ),
+            n8n_tools=None,
         )
 
     @classmethod
@@ -168,6 +188,7 @@ class Principal:
             providers=record.providers,
             sources=record.sources,
             capabilities=record.capabilities,
+            n8n_tools=record.n8n_tools,
             expires_at=record.expires_at,
         )
 
@@ -179,6 +200,18 @@ class Principal:
 
     def allows_source(self, source_id: str) -> bool:
         return self.sources is None or source_id in self.sources
+
+    def allows_n8n_instance(self, instance_id: str) -> bool:
+        return self.allows_provider("n8n") and (
+            self.type == "management" or instance_id in (self.n8n_tools or {})
+        )
+
+    def allows_n8n_tool(self, instance_id: str, tool_name: str) -> bool:
+        return self.allows_n8n_instance(instance_id) and (
+            self.type == "management"
+            or tool_name in (self.n8n_tools or {}).get(instance_id, frozenset())
+            or "*" in (self.n8n_tools or {}).get(instance_id, frozenset())
+        )
 
 
 class PrincipalRegistryConfigurationError(RuntimeError):

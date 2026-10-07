@@ -33,7 +33,9 @@ from app.adapters.hubspot.runtime import get_hubspot_runtime
 from app.adapters.n8n.models import (
     N8NStatusResult,
     N8NToolListResult,
+    N8NToolResult,
 )
+from app.adapters.n8n.instances import N8NInstanceRegistry
 from app.adapters.n8n.runtime import get_n8n_client
 from app.adapters.openwa.models import OpenWAStatusResult, OpenWAToolListResult
 from app.adapters.openwa.runtime import get_openwa_client
@@ -403,7 +405,7 @@ class BrunovaMCPServer(MCPServer):
                 content=[TextContent(type="text", text="tool_denied: The requested operation is not authorized.")],
                 is_error=True,
             )
-        is_n8n = name.startswith("n8n_") and name not in {"n8n_status", "n8n_list_tools"}
+        is_n8n = name.startswith("n8n_") and name not in N8N_STATIC_TOOLS
         is_openwa = name.startswith("openwa_") and name not in {
             "openwa_status", "openwa_list_tools", "openwa_prepare_approval_reference"
         }
@@ -435,7 +437,7 @@ class BrunovaMCPServer(MCPServer):
             return await self._call_openwa_tool(name, arguments, context)
         client = get_n8n_client()
         tools = await client.list_tools()
-        occupied = {"n8n_status", "n8n_list_tools"}
+        occupied = set(N8N_STATIC_TOOLS)
         mapping: dict[str, str] = {}
         for descriptor in tools:
             exposed = _downstream_exposed_name("n8n", descriptor.name, occupied)
@@ -646,6 +648,12 @@ TOOL_CAPABILITIES: dict[str, str] = {
     "convert_source_artifact": "convert",
 }
 
+N8N_ROUTED_TOOLS = frozenset({
+    "n8n_instances", "n8n_instance_status", "n8n_instance_list_tools",
+    "n8n_instance_call_tool",
+})
+N8N_STATIC_TOOLS = N8N_ROUTED_TOOLS | {"n8n_status", "n8n_list_tools"}
+
 
 def _tool_provider(name: str) -> str:
     if name.startswith("acquisition_"):
@@ -689,6 +697,8 @@ def _principal_can_see_tool(
 ) -> bool:
     if _tool_authorization_error(principal, name):
         return False
+    if name in N8N_ROUTED_TOOLS:
+        return True
     capability = TOOL_CAPABILITIES.get(name)
     return effective_capabilities is None or capability in effective_capabilities
 
@@ -701,6 +711,8 @@ def _tool_authorization_error(principal: Any, name: str) -> str | None:
     if principal.type == "signal_worker":
         operation = SIGNAL_WORKER_TOOLS.get(name)
         return None if operation in principal.signal_operations else "tool_denied"
+    if name in N8N_ROUTED_TOOLS:
+        return None if principal.allows_provider("n8n") and principal.n8n_tools else "tool_denied"
     if name in MANAGEMENT_ONLY_TOOLS:
         return "tool_denied"
     provider = _tool_provider(name)
@@ -2588,6 +2600,93 @@ async def hubspot_list_tools(ctx: Context) -> HubSpotToolListResult:
             operation_classification="read",
         )
         raise RuntimeError(f"{error.code}: {error.message}") from error
+
+
+def _authorized_n8n_instance(instance_id: str, tool_name: str | None = None) -> None:
+    """Bind a request to one enrolled instance before touching its secret."""
+
+    principal = active_principal()
+    allowed = (
+        principal.allows_n8n_tool(instance_id, tool_name)
+        if tool_name is not None else principal.allows_n8n_instance(instance_id)
+    )
+    if not allowed:
+        raise ToolError("n8n_instance_denied")
+    if instance_id not in N8NInstanceRegistry.from_environment().secret_variables:
+        raise ToolError("n8n_instance_not_found")
+
+
+@mcp_server.tool()
+async def n8n_instances(ctx: Context) -> dict[str, Any]:
+    """List only the n8n instances authorized for this caller; no endpoints or secrets."""
+
+    principal = active_principal()
+    instances = [
+        instance_id for instance_id in N8NInstanceRegistry.from_environment().ids()
+        if principal.allows_n8n_instance(instance_id)
+    ]
+    return {"instances": instances, "request_id": _mcp_request_id(ctx)}
+
+
+@mcp_server.tool()
+async def n8n_instance_status(instance_id: str, ctx: Context) -> dict[str, Any]:
+    """Return safe live status for one authorized n8n instance."""
+
+    _authorized_n8n_instance(instance_id)
+    request_id = _mcp_request_id(ctx)
+    try:
+        status = await get_n8n_client(instance_id).status()
+        result = status.model_dump()
+    except ValueError:
+        result = {"configured": False, "connected": False, "mcp_initialized": False, "tool_count": 0}
+    emit_audit_record(
+        request_id=request_id, action="n8n_instance_status", resource_id=instance_id,
+        resource_type="n8n_instance", result="success" if result["connected"] else "error",
+        http_status=200 if result["connected"] else 503, provider="n8n",
+        operation_classification="read",
+    )
+    return {"instance_id": instance_id, **result, "request_id": request_id}
+
+
+@mcp_server.tool()
+async def n8n_instance_list_tools(instance_id: str, ctx: Context) -> dict[str, Any]:
+    """Discover only tools allowed for this caller on one n8n instance."""
+
+    _authorized_n8n_instance(instance_id)
+    principal = active_principal()
+    tools = await get_n8n_client(instance_id).list_tools(force_refresh=True)
+    visible = [tool.model_dump() for tool in tools if principal.allows_n8n_tool(instance_id, tool.name)]
+    return {"instance_id": instance_id, "tools": visible, "request_id": _mcp_request_id(ctx)}
+
+
+@mcp_server.tool()
+async def n8n_instance_call_tool(
+    instance_id: str, tool_name: str, arguments: dict[str, Any], ctx: Context,
+) -> N8NToolResult:
+    """Call an exact allowlisted tool on one explicitly selected n8n instance."""
+
+    _authorized_n8n_instance(instance_id, tool_name)
+    request_id = _mcp_request_id(ctx)
+    started = time.monotonic()
+    try:
+        result = await get_n8n_client(instance_id).call_tool(tool_name, arguments)
+        failed = bool(result.get("isError", False)) if isinstance(result, dict) else False
+        emit_audit_record(
+            request_id=request_id, action="n8n_instance_tool_call", resource_id=instance_id,
+            resource_type="n8n_instance", result="error" if failed else "success",
+            http_status=502 if failed else 200, provider="n8n", tool=tool_name,
+            approval_reference=_approval_reference(ctx),
+            duration_ms=round((time.monotonic() - started) * 1000),
+        )
+        return N8NToolResult(tool=tool_name, result=result, request_id=request_id)
+    except WorkspaceAdapterError as error:
+        emit_audit_record(
+            request_id=request_id, action="n8n_instance_tool_call", resource_id=instance_id,
+            resource_type="n8n_instance", result="error", http_status=error.status_code,
+            error_code=error.code, provider="n8n", tool=tool_name,
+            duration_ms=round((time.monotonic() - started) * 1000),
+        )
+        raise ToolError(error.code) from error
 
 
 @mcp_server.tool()

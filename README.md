@@ -1003,11 +1003,16 @@ independiente para cada consumidor.
 El SDK MCP 2.x requiere Python 3.10 o posterior. La imagen de Cloud Run usa
 Python 3.12.
 
-## n8n MCP full access
+## n8n MCP por instancia
 
 El Gateway usa el SDK MCP oficial como cliente downstream. La configuración
-completa se inyecta en `N8N_MCP_JSON` desde un único secreto de Google Secret
-Manager; producción no lee `.env`. `N8N_DISCOVERY_TTL_SECONDS` (60 por defecto)
+completa de Brunova se inyecta en `N8N_MCP_JSON` desde Google Secret Manager.
+`N8N_INSTANCE_REGISTRY_JSON` es un mapa **no secreto** de identificador de instancia
+a nombre de variable de entorno secreta. Si se omite, solo existe `brunova` y
+usa `N8N_MCP_JSON`, preservando la integración anterior. Cada instancia debe
+usar una variable y credencial distinta; por ejemplo, `headquarters` usa
+`N8N_HEADQUARTERS_MCP_JSON`. Producción no lee `.env`.
+`N8N_DISCOVERY_TTL_SECONDS` (60 por defecto)
 y `N8N_TIMEOUT_SECONDS` (30 por defecto) son configuración no sensible.
 
 Discovery conserva nombre, descripción, input schema y metadata segura. Cada
@@ -1016,8 +1021,17 @@ una tool nativa se usa `n8n_downstream_<downstream_tool_name>`. `n8n_list_tools`
 fuerza discovery actual y `n8n_status` expone únicamente estado, conteo y
 versiones de protocolo/servidor cuando están disponibles.
 
-No existe allowlist, clasificación read/mutation, activation flag ni policy
-engine n8n en el Gateway. Todo lo que n8n MCP exponga queda disponible. El TTL
+La proyección `n8n_<tool>` anterior permanece ligada solo a Brunova y visible
+solo para Management. Las nuevas tools `n8n_instances`,
+`n8n_instance_status`, `n8n_instance_list_tools` y `n8n_instance_call_tool`
+exigen seleccionar una instancia en cada solicitud. Management puede usar las
+instancias registradas; un principal developer solo ve y llama las instancias y
+los nombres de tool enumerados en su registro `n8n_tools`. Un grant `"*"`
+permite todas las tools que esa instancia exponga, sin extenderse a otras.
+`providers.n8n=true` por sí solo no concede acceso a ninguna instancia.
+
+No hay clasificación read/mutation ni policy engine para el contenido de n8n.
+Dentro de una instancia autorizada, el Gateway usa el catálogo que n8n expone. El TTL
 permite altas y bajas sin deploy; un error de discovery vacía el catálogo n8n
 sin afectar `/health`, Workspace, HubSpot o las tools nativas.
 
