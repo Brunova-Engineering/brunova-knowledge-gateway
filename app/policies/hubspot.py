@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -26,7 +25,6 @@ READ_TOOLS = frozenset(
     }
 )
 MUTATION_TOOLS = frozenset({"manage_crm_objects"})
-APPROVAL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{2,127}$")
 SENSITIVE_ARGUMENT_NAMES = frozenset(
     {"access_token", "refresh_token", "client_secret", "authorization"}
 )
@@ -44,7 +42,7 @@ class HubSpotToolPolicy:
         if tool_name in READ_TOOLS:
             return HubSpotToolDecision("read", True, False)
         if tool_name in MUTATION_TOOLS:
-            return HubSpotToolDecision("mutation", True, True)
+            return HubSpotToolDecision("mutation", True, False)
         return HubSpotToolDecision("unknown", False, False)
 
     def authorize(
@@ -66,12 +64,6 @@ class HubSpotToolPolicy:
                 raise WorkspaceAdapterError(
                     "hubspot_mutation_intent_required",
                     "Explicit mutation intent is required.",
-                    403,
-                )
-            if not approval_reference or not APPROVAL_PATTERN.fullmatch(approval_reference):
-                raise WorkspaceAdapterError(
-                    "hubspot_approval_required",
-                    "A valid external approval reference is required.",
                     403,
                 )
         return decision

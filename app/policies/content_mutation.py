@@ -41,18 +41,9 @@ class ContentMutationPolicy:
         *,
         source_id: str,
         operation: MutationOperation,
-        approval_reference: str,
+        approval_reference: str = "",
     ) -> AllowedSource:
         principal = active_principal()
-        if (
-            principal.type == "management"
-            and self.normalized_approval_reference(approval_reference) is None
-        ):
-            raise WorkspaceAdapterError(
-                "mutation_approval_required",
-                "A valid external approval reference is required for mutations.",
-                403,
-            )
         try:
             source = self._registry.get(source_id)
         except KeyError as error:
@@ -108,6 +99,7 @@ class ContentMutationPolicy:
 
     @classmethod
     def normalized_approval_reference(cls, value: str) -> str | None:
+        """Normalize optional legacy audit metadata; it grants no authority."""
         candidate = value.strip()
         if cls.APPROVAL_REFERENCE_PATTERN.fullmatch(candidate):
             return candidate

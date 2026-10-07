@@ -46,7 +46,6 @@ from app.agent_signals import (
     SignalStatus,
 )
 from app.artifact_refs import ArtifactReferenceCodec
-from app.openwa_approval import reference_for_confirmed_operation, validate_reference
 from app.audit import correlation_id, emit_audit_record
 from app.auth.principals import (
     CapabilityScope,
@@ -294,10 +293,6 @@ class HubSpotToolListResult(BaseModel):
     request_id: str
 
 
-class OpenWAApprovalReferenceToolResult(BaseModel):
-    approval_reference: str
-
-
 class BrunovaMCPServer(MCPServer):
     """MCP server that projects provider-curated live downstream catalogs."""
 
@@ -337,42 +332,14 @@ class BrunovaMCPServer(MCPServer):
                 occupied.add(exposed_name)
                 tools.append(MCPTool(
                     name=exposed_name,
-                    description=(
-                        (descriptor.description or "")
-                        + (" For writes, verify explicit human authorization for this exact operation. "
-                           "Supply approval_evidence with the actual conversation reference and the "
-                           "human request that authorized this send. The Gateway binds that provenance "
-                           "to the exact tool and arguments. Never invent a technical approval token, "
-                           "ask the human for an identifier, or infer consent from a draft."
-                           if descriptor.tier == "write" else "")
-                    ),
-                    input_schema=(
-                        {**descriptor.input_schema,
-                         "properties": {**descriptor.input_schema.get("properties", {}),
-                                        "approval_evidence": {
-                                            "type": "object",
-                                            "description": "Agent-attested reference to the explicit human instruction authorizing this exact operation; gateway metadata only, never sent to OpenWA.",
-                                            "properties": {
-                                                "conversation_ref": {"type": "string", "minLength": 1, "maxLength": 512,
-                                                    "description": "Actual conversation/thread reference. Use a precise visible reference if the host provides no opaque ID."},
-                                                "human_request_ref": {"type": "string", "minLength": 1, "maxLength": 512,
-                                                    "description": "Actual human turn/request authorizing this exact send, not an assistant draft."},
-                                            },
-                                            "required": ["conversation_ref", "human_request_ref"],
-                                            "additionalProperties": False,
-                                        }},
-                         "required": list(dict.fromkeys([
-                             *descriptor.input_schema.get("required", []), "approval_evidence"
-                         ]))}
-                        if descriptor.tier == "write" else descriptor.input_schema
-                    ),
+                    description=descriptor.description,
+                    input_schema=descriptor.input_schema,
                     annotations=descriptor.annotations or None,
                     _meta={
                         **descriptor.metadata,
                         "provider": "openwa",
                         "downstream_tool": descriptor.name,
                         "tier": descriptor.tier,
-                        "approval_reference_required": descriptor.tier == "write",
                     },
                 ))
         return tools
@@ -407,7 +374,7 @@ class BrunovaMCPServer(MCPServer):
             )
         is_n8n = name.startswith("n8n_") and name not in N8N_STATIC_TOOLS
         is_openwa = name.startswith("openwa_") and name not in {
-            "openwa_status", "openwa_list_tools", "openwa_prepare_approval_reference"
+            "openwa_status", "openwa_list_tools"
         }
         if not is_n8n and not is_openwa:
             if name in ACQUISITION_TOOLS:
@@ -487,8 +454,9 @@ class BrunovaMCPServer(MCPServer):
         context: Context | None,
     ) -> CallToolResult:
         request_id = correlation_id(str(context.request_id) if context else None)
-        metadata_reference = _approval_reference(context)
-        approval_reference = None
+        approval_reference = ContentMutationPolicy.normalized_approval_reference(
+            _approval_reference(context) or ""
+        )
         started = time.monotonic()
         try:
             client = get_openwa_client()
@@ -506,39 +474,13 @@ class BrunovaMCPServer(MCPServer):
                     "The OpenWA tool is not currently exposed.",
                     404,
                 )
-            if descriptor.tier == "write":
-                # The model supplies provenance, while the Gateway constructs the
-                # bounded reference from the exact downstream operation. Legacy
-                # metadata/argument references remain valid for existing clients.
-                arguments = dict(arguments)
-                evidence = arguments.pop("approval_evidence", None)
-                argument_reference = arguments.pop("approval_reference", None)
-                if (metadata_reference is not None and argument_reference is not None
-                        and metadata_reference != argument_reference):
-                    raise WorkspaceAdapterError(
-                        "openwa_approval_conflict", "Conflicting approval metadata.", 403
-                    )
-                direct_reference = (metadata_reference if metadata_reference is not None
-                                    else argument_reference)
-                if evidence is not None:
-                    if (not isinstance(evidence, dict)
-                            or set(evidence) != {"conversation_ref", "human_request_ref"}
-                            or any(not isinstance(evidence[key], str)
-                                   or not 1 <= len(evidence[key].strip()) <= 512
-                                   for key in ("conversation_ref", "human_request_ref"))):
-                        raise WorkspaceAdapterError(
-                            "openwa_approval_required", "Valid human approval evidence is required.", 403
-                        )
-                    derived_reference = reference_for_confirmed_operation(
-                        evidence["conversation_ref"], evidence["human_request_ref"],
-                        descriptor.name, arguments,
-                    )
-                    if direct_reference is not None and direct_reference != derived_reference:
-                        raise WorkspaceAdapterError(
-                            "openwa_approval_conflict", "Conflicting approval metadata.", 403
-                        )
-                    direct_reference = derived_reference
-                approval_reference = validate_reference(direct_reference, descriptor.name, arguments)
+            arguments = dict(arguments)
+            argument_reference = arguments.pop("approval_reference", None)
+            if approval_reference is None and isinstance(argument_reference, str):
+                approval_reference = ContentMutationPolicy.normalized_approval_reference(
+                    argument_reference
+                )
+            arguments.pop("approval_evidence", None)
             result = await client.call_tool(descriptor.name, arguments)
             downstream_failed = bool(result.get("isError", False)) if isinstance(result, dict) else False
             emit_audit_record(
@@ -809,7 +751,7 @@ def _execute_tool(
     authorization_mode = (
         "principal_scope"
         if principal.type == "developer"
-        else "external_approval"
+        else "authenticated_principal"
         if capability in {"create", "update", "move", "delete", "share", "convert"}
         else None
     )
@@ -2741,35 +2683,6 @@ async def n8n_list_tools(ctx: Context) -> N8NToolListResult:
 
 
 @mcp_server.tool()
-async def openwa_prepare_approval_reference(
-    thread_id: str,
-    confirmation_id: str,
-    tool: str,
-    arguments: dict[str, Any],
-    ctx: Context,
-) -> OpenWAApprovalReferenceToolResult:
-    """Bind an already approved OpenWA write to its exact payload, without sending it.
-
-    Use real conversation and confirming human request references. If the host
-    does not expose opaque IDs, identify the actual conversation and request
-    precisely; do not invent an approval or ask the human for technical IDs.
-    A draft or a different recipient/content is not confirmation. This tool
-    computes a correlation value only; Gateway still checks the write.
-    """
-
-    try:
-        descriptors = await get_openwa_client().list_tools()
-        if not any(item.name == tool and item.tier == "write" for item in descriptors):
-            raise ValueError("unknown OpenWA write tool")
-        reference = reference_for_confirmed_operation(
-            thread_id, confirmation_id, tool, arguments
-        )
-    except (ValueError, TypeError) as error:
-        raise RuntimeError("openwa_approval_input_invalid: exact write provenance and arguments required") from error
-    return OpenWAApprovalReferenceToolResult(approval_reference=reference)
-
-
-@mcp_server.tool()
 async def openwa_status(ctx: Context) -> OpenWAStatusResult:
     """Return safe OpenWA MCP connectivity, mode, and catalog status."""
 
@@ -2920,17 +2833,15 @@ async def hubspot_call_read_tool(
 @mcp_server.tool()
 async def hubspot_manage_crm_objects(
     arguments: dict[str, Any],
-    approval_reference: str,
     explicit_intent: bool,
     ctx: Context,
 ) -> HubSpotToolResult:
-    """Create or update HubSpot CRM data after explicit human approval."""
+    """Create or update HubSpot CRM data when mutation intent is explicit."""
 
     return await _execute_hubspot_tool(
         ctx=ctx,
         tool_name="manage_crm_objects",
         arguments=arguments,
-        approval_reference=approval_reference,
         explicit_intent=explicit_intent,
     )
 
