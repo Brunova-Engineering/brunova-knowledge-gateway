@@ -151,6 +151,24 @@ def test_unavailable_invalid_auth_and_redirects_fail_without_fallback(monkeypatc
     assert unpack(asyncio.run(acquisition.portal_request("GET", "/engine-health")))["httpStatus"] == 503
 
 
+def test_discovery_response_ceiling_accepts_bounded_payload_and_rejects_oversize(monkeypatch):
+    def bounded(request):
+        assert request.url.path == "/api/acquisition/v1/discovery"
+        return httpx.Response(200, json={"history": "x" * 1_574_454})
+    configure(monkeypatch, bounded)
+    accepted = unpack(asyncio.run(mcp_server.call_tool("acquisition_get_discovery", {})))
+    assert accepted["httpStatus"] == 200
+    assert len(accepted["data"]["history"]) == 1_574_454
+    monkeypatch.undo()
+
+    def oversized(request):
+        return httpx.Response(200, json={"history": "x" * 2_646_646})
+    configure(monkeypatch, oversized)
+    rejected = unpack(asyncio.run(mcp_server.call_tool("acquisition_get_discovery", {})))
+    assert rejected["httpStatus"] == 503
+    assert rejected["data"]["code"] == "ACQUISITION_UNAVAILABLE"
+
+
 def test_signal_accepts_only_canonical_service_provenance():
     from tests.test_agent_signals import acquisition_dict
     from app.agent_signals import AgentSignalPayload
