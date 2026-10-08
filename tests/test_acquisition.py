@@ -151,6 +151,40 @@ def test_unavailable_invalid_auth_and_redirects_fail_without_fallback(monkeypatc
     assert unpack(asyncio.run(acquisition.portal_request("GET", "/engine-health")))["httpStatus"] == 503
 
 
+def test_discovery_response_ceiling_accepts_bounded_payload_and_rejects_oversize(monkeypatch):
+    audit_records = []
+    monkeypatch.setattr(acquisition, "emit_audit_record", lambda **kwargs: audit_records.append(kwargs))
+    def bounded(request):
+        assert request.url.path == "/api/acquisition/v1/discovery"
+        return httpx.Response(200, json={"history": "x" * 1_574_454})
+    configure(monkeypatch, bounded)
+    accepted = unpack(asyncio.run(mcp_server.call_tool("acquisition_get_discovery", {})))
+    assert accepted["httpStatus"] == 200
+    assert len(accepted["data"]["history"]) == 1_574_454
+    monkeypatch.undo()
+    monkeypatch.setattr(acquisition, "emit_audit_record", lambda **kwargs: audit_records.append(kwargs))
+
+    def oversized(request):
+        return httpx.Response(200, json={"history": "x" * 2_646_646})
+    configure(monkeypatch, oversized)
+    rejected = unpack(asyncio.run(mcp_server.call_tool("acquisition_get_discovery", {})))
+    assert rejected["httpStatus"] == 503
+    assert rejected["data"]["code"] == "ACQUISITION_UNAVAILABLE"
+    assert "error_reason" not in rejected["data"]
+    assert audit_records[-1]["error_reason"] == "response_too_large"
+
+
+def test_discovery_invalid_json_is_classified_only_in_audit(monkeypatch):
+    audit_records = []
+    monkeypatch.setattr(acquisition, "emit_audit_record", lambda **kwargs: audit_records.append(kwargs))
+    configure(monkeypatch, lambda request: httpx.Response(200, text="not-json"))
+    result = unpack(asyncio.run(mcp_server.call_tool("acquisition_get_discovery", {})))
+    assert result["httpStatus"] == 503
+    assert result["data"]["code"] == "ACQUISITION_UNAVAILABLE"
+    assert "error_reason" not in result["data"]
+    assert audit_records[-1]["error_reason"] == "invalid_json"
+
+
 def test_signal_accepts_only_canonical_service_provenance():
     from tests.test_agent_signals import acquisition_dict
     from app.agent_signals import AgentSignalPayload
@@ -217,6 +251,8 @@ def test_management_capability_objective_provenance_and_worker_boundary(monkeypa
 
 def test_all_management_tools_forward_only_narrow_contract(monkeypatch):
     cases = [
+        ('acquisition_prepare_conversation', 'DISCOVERY_CONTROL', dict(cycle_id='c',candidate_id='candidate-1',expected_version=0,evidence_observation_ids=['observation-1'],proposal={'signalKind':'OTHER','hypothesis':'Synthetic evidence-bound hypothesis.'})),
+        ('acquisition_bind_candidate_message', 'DISCOVERY_CONTROL', dict(proposal_id='proposal-1',expected_buyer_result_id='buyer-1',expected_message_version=1)),
         ('acquisition_archive_candidate', 'DISCOVERY_CONTROL', dict(candidate_id='candidate-1',reason='Remove from the active workspace while preserving evidence.')),
         ('acquisition_restore_candidate', 'DISCOVERY_CONTROL', dict(candidate_id='candidate-1',reason='Return to the active workspace for bounded review.')),
         ('acquisition_request_authenticated_research', 'DISCOVERY_CONTROL', dict(cycle_id='c',policy_hash='a'*64,uri='https://www.linkedin.com/feed/',surface='LINKEDIN',evidence_expected='Authenticated feed navigation is rendered read-only.')),

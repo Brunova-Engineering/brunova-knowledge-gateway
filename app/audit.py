@@ -78,6 +78,7 @@ def emit_audit_event(
     result: str,
     http_status: int,
     error_code: str | None = None,
+    error_reason: str | None = None,
 ) -> None:
     emit_audit_record(
         request_id=request.state.request_id,
@@ -87,6 +88,7 @@ def emit_audit_event(
         result=result,
         http_status=http_status,
         error_code=error_code,
+        error_reason=error_reason,
         source_id=getattr(request.state, "source_id", None),
         source_classification=getattr(request.state, "classification", None),
         candidate_count=getattr(request.state, "candidate_count", None),
@@ -117,6 +119,7 @@ def emit_audit_record(
     result: str,
     http_status: int,
     error_code: str | None = None,
+    error_reason: str | None = None,
     source_id: str | list[str] | None = None,
     source_classification: str | list[str] | None = None,
     consumer: str | None = None,
@@ -239,4 +242,6 @@ def emit_audit_record(
         event["principal_type"] = principal_type
     if error_code:
         event["error_code"] = error_code
+    if error_reason:
+        event["error_reason"] = error_reason
     audit_logger.info(json.dumps(event, separators=(",", ":"), sort_keys=True))
