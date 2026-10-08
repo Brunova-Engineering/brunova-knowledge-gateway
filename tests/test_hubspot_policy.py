@@ -18,7 +18,7 @@ def test_unknown_tool_is_default_denied():
     assert raised.value.code == "hubspot_tool_not_allowed"
 
 
-def test_mutation_requires_explicit_intent_and_approval():
+def test_mutation_requires_explicit_intent_but_no_external_approval():
     policy = HubSpotToolPolicy()
     with pytest.raises(WorkspaceAdapterError) as missing_intent:
         policy.authorize(
@@ -26,17 +26,13 @@ def test_mutation_requires_explicit_intent_and_approval():
         )
     assert missing_intent.value.code == "hubspot_mutation_intent_required"
 
-    with pytest.raises(WorkspaceAdapterError) as missing_approval:
-        policy.authorize("manage_crm_objects", {}, explicit_intent=True)
-    assert missing_approval.value.code == "hubspot_approval_required"
-
     decision = policy.authorize(
         "manage_crm_objects",
         {"object_type": "contacts"},
         explicit_intent=True,
-        approval_reference="human-approval-123",
     )
     assert decision.classification == "mutation"
+    assert decision.approval_required is False
 
 
 def test_credentials_are_rejected_even_when_nested():

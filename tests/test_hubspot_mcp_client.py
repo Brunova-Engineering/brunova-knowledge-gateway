@@ -73,6 +73,7 @@ def test_downstream_initialization_lists_and_classifies_live_tools():
         "manage_crm_objects": ("mutation", True),
         "future_tool": ("unknown", False),
     }
+    assert next(tool for tool in tools if tool.name == "manage_crm_objects").approval_required is False
 
 
 def test_read_tool_calls_official_downstream_tool():
@@ -96,7 +97,7 @@ def test_unknown_tool_is_blocked_before_downstream_invocation():
     assert client.calls == []
 
 
-def test_mutation_with_approval_is_allowed_and_without_it_is_blocked():
+def test_mutation_needs_explicit_intent_but_no_external_approval():
     client = FakeDownstreamClient()
     with pytest.raises(WorkspaceAdapterError) as raised:
         asyncio.run(adapter(client).call_tool("manage_crm_objects", {}))
@@ -107,7 +108,6 @@ def test_mutation_with_approval_is_allowed_and_without_it_is_blocked():
             "manage_crm_objects",
             {"object_type": "companies"},
             explicit_intent=True,
-            approval_reference="human-approval-456",
         )
     )
     assert client.calls == [("manage_crm_objects", {"object_type": "companies"})]

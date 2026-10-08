@@ -371,17 +371,16 @@ mutación de management requiere simultáneamente:
 - `source_id` presente en el Source Registry versionado;
 - fuente activa y no bloqueada;
 - capability exacta habilitada (`create`, `update`, `move`, `delete` o `share`);
-- `approval_reference` externa, con formato seguro;
 - pertenencia source-scoped del artefacto y, para move, del destino.
 
 Para un principal developer, la autoridad delegada es la intersección de su
-provider, fuente asignada, capability del principal y capability de la fuente;
-no requiere `approval_reference`. Una referencia recibida nunca amplía ese
-scope. Management conserva el requisito externo anterior.
+provider, fuente asignada, capability del principal y capability de la fuente.
+Ningún principal requiere `approval_reference`; una referencia recibida nunca
+amplía ese scope.
 
-La presencia en `sources.yaml` representa la aprobación de la fuente. El
-Gateway no interpreta ni aprueba la referencia de decisión: solo exige su
-presencia y la conserva en auditoría.
+La presencia en `sources.yaml` representa la aprobación de la fuente. Si se
+recibe una referencia de decisión, el Gateway la conserva como metadata de
+auditoría sin usarla para autorizar.
 
 Las operaciones soportadas están deliberadamente acotadas:
 
@@ -744,7 +743,7 @@ handle manipulado, usado con otra fuente o aplicado a otro documento falla
 cerrado.
 
 `create_document_tab`, `rename_document_tab` y `delete_document_tab` requieren
-capability `update`, Approval Reference y `required_revision_id`; se auditan como
+capability `update` y `required_revision_id`; se auditan como
 mutaciones gobernadas. Delete rechaza la última tab y tabs con descendientes.
 `edit_source_document` acepta un scope `tab_ref` y convierte internamente las
 referencias opacas a los IDs que Google requiere. En un documento multi-tab no
@@ -968,7 +967,7 @@ Un refresh inválido marca la conexión como `reauthorization_required`.
 El catálogo downstream se consulta mediante `hubspot_list_tools`; cada tool se
 clasifica como `read`, `mutation` o `unknown`. Las lecturas explícitamente
 permitidas se exponen con prefijo `hubspot_`. `hubspot_manage_crm_objects`
-requiere `explicit_intent=true` y un `approval_reference` externo. Las tools
+requiere `explicit_intent=true`. Las tools
 desconocidas fallan cerradas hasta ser clasificadas en código y tests. Auditoría
 registra provider, tool, clasificación, resultado, correlation ID y approval
 cuando aplica, sin incluir payload CRM completo ni credenciales.
@@ -1071,18 +1070,9 @@ de OpenWA no afecta Workspace, HubSpot, n8n ni `/health`.
 
 Las anotaciones downstream son la clasificación autoritativa. Las tools con
 `readOnlyHint=true` se ejecutan como lecturas. Cualquier otra tool se trata como
-escritura y requiere evidencia de la autorización humana para esa operación.
-El catálogo de escritura exige `approval_evidence` con referencias a la
-conversación y a la petición humana concreta. El Gateway calcula y valida la
-referencia acotada `owa1` contra la tool y los argumentos finales; nunca envía
-la evidencia a OpenWA. Los clientes existentes pueden seguir pasando una
-`approval_reference` válida en `params._meta` o en argumentos. La tool
-`openwa_prepare_approval_reference` permanece para esos clientes; no es
-necesaria en el flujo interactivo. Esta referencia codifica procedencia
-declarada por el agente, no prueba criptográficamente que el humano aprobó:
-el Management Agent debe identificar primero la instrucción explícita y
-comprobar que cubre destinatario, contenido y reintentos.
-La referencia se audita, pero los argumentos, cuerpos de mensajes, media,
+escritura y sigue sujeta al RBAC del principal. La evidencia o referencia de
+aprobación es opcional y, si se recibe, sirve solo como metadata de auditoría;
+no amplía permisos. Los argumentos, cuerpos de mensajes, media,
 respuestas completas, URL y credenciales no se registran. El Gateway no añade
 un proxy REST ni una segunda allowlist de operaciones OpenWA.
 

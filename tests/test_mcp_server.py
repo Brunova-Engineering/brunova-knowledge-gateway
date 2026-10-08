@@ -608,7 +608,6 @@ def test_mcp_exposes_only_governed_tools(monkeypatch):
             "n8n_instance_call_tool",
             "openwa_status",
             "openwa_list_tools",
-            "openwa_prepare_approval_reference",
             "list_agent_signals",
             "get_agent_signal",
             "claim_agent_signal",
@@ -1275,7 +1274,7 @@ def test_developer_spreadsheet_lifecycle_and_tool_filtering(monkeypatch):
 
     names = {tool.name for tool in tools.tools}
     assert {"inspect_spreadsheet_structure", "edit_source_spreadsheet", "validate_spreadsheet_structure", "convert_source_artifact"} <= names
-    assert {"delete_source_artifact", "share_source_artifact", "hubspot_list_tools", "n8n_status", "openwa_status", "openwa_prepare_approval_reference", "list_agent_signals"}.isdisjoint(names)
+    assert {"delete_source_artifact", "share_source_artifact", "hubspot_list_tools", "n8n_status", "openwa_status", "list_agent_signals"}.isdisjoint(names)
     assert created.is_error is False
     assert created.structured_content["artifact"]["type"] == "spreadsheet"
     assert inspected.is_error is False
@@ -1295,7 +1294,7 @@ def test_developer_spreadsheet_lifecycle_and_tool_filtering(monkeypatch):
     assert "operations" not in edit_audit
 
 
-def test_management_spreadsheet_edit_requires_approval_and_enforces_mime_and_scope(monkeypatch):
+def test_management_spreadsheet_edit_needs_no_external_approval_and_enforces_mime_and_scope(monkeypatch):
     gateway_runtime = runtime()
     monkeypatch.setattr(mcp_module, "get_runtime_gateway", lambda: gateway_runtime)
     sheet_ref = gateway_runtime.artifact_reference_codec.encode(
@@ -1322,7 +1321,7 @@ def test_management_spreadsheet_edit_requires_approval_and_enforces_mime_and_sco
                 "edit_source_spreadsheet",
                 {"source_id": "career_ops", "artifact_ref": sheet_ref, "operations": [operation], "approval_reference": "decision-sheet-test"},
             )
-            missing_approval = await client.call_tool(
+            no_approval = await client.call_tool(
                 "edit_source_spreadsheet",
                 {"source_id": "career_ops", "artifact_ref": sheet_ref, "operations": [operation]},
             )
@@ -1344,12 +1343,12 @@ def test_management_spreadsheet_edit_requires_approval_and_enforces_mime_and_sco
                 "edit_source_spreadsheet",
                 {"source_id": "career_ops", "artifact_ref": outside_ref, "operations": [operation], "approval_reference": "decision-sheet-test"},
             )
-        return approved, missing_approval, wrong_mime, cross_source, outside_source
+            return approved, no_approval, wrong_mime, cross_source, outside_source
 
-    approved, missing_approval, wrong_mime, cross_source, outside_source = run(scenario())
+    approved, no_approval, wrong_mime, cross_source, outside_source = run(scenario())
 
     assert approved.is_error is False
-    assert "mutation_approval_required" in missing_approval.content[0].text
+    assert no_approval.is_error is False
     assert "resource_type_invalid" in wrong_mime.content[0].text
     assert "artifact_reference_invalid" in cross_source.content[0].text
     assert "resource_not_in_source" in outside_source.content[0].text
@@ -1434,28 +1433,27 @@ def test_developer_spreadsheet_edit_denies_capability_and_source_escalation(monk
     }
 
 
-def test_structured_mutations_require_approval_and_enforce_source_scope(monkeypatch):
+def test_structured_mutations_need_no_external_approval_and_enforce_source_scope(monkeypatch):
     permitted_runtime = runtime()
     artifact_ref = permitted_runtime.artifact_reference_codec.encode(
         source_id="career_ops", artifact_id="document_12345"
     )
     monkeypatch.setattr(mcp_module, "get_runtime_gateway", lambda: permitted_runtime)
 
-    async def missing_approval_scenario():
+    async def no_approval_scenario():
         async with Client(mcp_module.mcp_server) as client:
             return await client.call_tool(
                 "copy_source_artifact",
                 {
                     "source_id": "career_ops",
                     "artifact_ref": artifact_ref,
-                    "name": "Must Not Be Copied",
+                    "name": "Copied Without External Approval",
                 },
             )
 
-    missing_approval = run(missing_approval_scenario())
-    assert missing_approval.is_error is True
-    assert "mutation_approval_required" in missing_approval.content[0].text
-    assert permitted_runtime.workspace_adapter.copied == []
+    no_approval = run(no_approval_scenario())
+    assert no_approval.is_error is False
+    assert len(permitted_runtime.workspace_adapter.copied) == 1
 
     outside_runtime = runtime(in_source=False)
     outside_ref = outside_runtime.artifact_reference_codec.encode(
@@ -1914,7 +1912,7 @@ def test_mcp_converts_xlsx_and_xlsm_then_moves_original_with_full_audit(monkeypa
     assert all("content" not in call.kwargs for call in lifecycle_audits)
 
 
-def test_mcp_conversion_rejects_missing_approval_unknown_source_and_scope(monkeypatch):
+def test_mcp_conversion_needs_no_external_approval_and_enforces_source_scope(monkeypatch):
     audit = Mock()
     monkeypatch.setattr(mcp_module, "emit_audit_record", audit)
 
@@ -1922,7 +1920,7 @@ def test_mcp_conversion_rejects_missing_approval_unknown_source_and_scope(monkey
         gateway_runtime = runtime()
         monkeypatch.setattr(mcp_module, "get_runtime_gateway", lambda: gateway_runtime)
         async with Client(mcp_module.mcp_server) as client:
-            missing_approval = await client.call_tool(
+            conversion = await client.call_tool(
                 "convert_source_artifact",
                 {
                     "source_id": "career_ops",
@@ -1955,11 +1953,11 @@ def test_mcp_conversion_rejects_missing_approval_unknown_source_and_scope(monkey
                     "approval_reference": "decision-v017-convert",
                 },
             )
-        return missing_approval, unknown_source, outside_scope
+        return conversion, unknown_source, outside_scope
 
-    missing_approval, unknown_source, outside_scope = run(scenario())
+    conversion, unknown_source, outside_scope = run(scenario())
 
-    assert "mutation_approval_required" in missing_approval.content[0].text
+    assert conversion.is_error is False
     assert "source_not_found" in unknown_source.content[0].text
     assert "resource_not_in_source" in outside_scope.content[0].text
 
@@ -1991,7 +1989,7 @@ def test_mcp_moves_office_original_to_explicit_archive_destination(monkeypatch):
     assert audit.call_args.kwargs["destination_source_id"] == "legacy_archive"
 
 
-def test_mcp_mutation_blocks_missing_approval_and_capability(monkeypatch):
+def test_mcp_mutation_without_approval_still_blocks_missing_capability(monkeypatch):
     audit = Mock()
     monkeypatch.setattr(mcp_module, "emit_audit_record", audit)
 
@@ -2003,7 +2001,7 @@ def test_mcp_mutation_blocks_missing_approval_and_capability(monkeypatch):
             lambda: disabled_runtime,
         )
         async with Client(mcp_module.mcp_server) as client:
-            missing_approval = await client.call_tool(
+            missing_capability = await client.call_tool(
                 "create_source_artifact",
                 {
                     "source_id": "career_ops",
@@ -2020,16 +2018,16 @@ def test_mcp_mutation_blocks_missing_approval_and_capability(monkeypatch):
                     "approval_reference": "decision-v015-test",
                 },
             )
-            return missing_approval, denied_capability
+            return missing_capability, denied_capability
 
-    missing_approval, denied_capability = run(scenario())
+    missing_capability, denied_capability = run(scenario())
 
-    assert missing_approval.is_error is True
-    assert "mutation_approval_required" in missing_approval.content[0].text
+    assert missing_capability.is_error is True
+    assert "source_capability_denied" in missing_capability.content[0].text
     assert denied_capability.is_error is True
     assert "source_capability_denied" in denied_capability.content[0].text
     assert [call.kwargs["error_code"] for call in audit.call_args_list] == [
-        "mutation_approval_required",
+        "source_capability_denied",
         "source_capability_denied",
     ]
 
@@ -2075,7 +2073,7 @@ def test_mcp_delete_and_share_block_artifacts_outside_selected_source(monkeypatc
     assert gateway_runtime.workspace_adapter.shared == []
 
 
-def test_mcp_delete_and_share_require_approval_reference(monkeypatch):
+def test_mcp_delete_and_share_need_no_external_approval_reference(monkeypatch):
     gateway_runtime = runtime()
     monkeypatch.setattr(
         mcp_module,
@@ -2106,12 +2104,12 @@ def test_mcp_delete_and_share_require_approval_reference(monkeypatch):
 
     deleted, shared = run(scenario())
 
-    assert deleted.is_error is True
-    assert "mutation_approval_required" in deleted.content[0].text
-    assert shared.is_error is True
-    assert "mutation_approval_required" in shared.content[0].text
-    assert gateway_runtime.workspace_adapter.deleted == []
-    assert gateway_runtime.workspace_adapter.shared == []
+    assert deleted.is_error is False
+    assert shared.is_error is False
+    assert gateway_runtime.workspace_adapter.deleted == ["created_document_123"]
+    assert gateway_runtime.workspace_adapter.shared == [
+        ("created_document_123", "reviewer@brunova.mx")
+    ]
 
 
 def test_mcp_delete_and_share_protect_registered_source_root(monkeypatch):
