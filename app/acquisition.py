@@ -64,6 +64,7 @@ async def portal_request(method: str, path: str, *, params: dict | None = None,
     cid = correlation_id(body.get("commandId") if body else None)
     status = 503
     code = "ACQUISITION_UNAVAILABLE"
+    error_reason: str | None = None
     payload: Any = {"code": code}
     if principal.type != "management":
         status, code = 403, "ACQUISITION_CAPABILITY_DENIED"
@@ -100,12 +101,23 @@ async def portal_request(method: str, path: str, *, params: dict | None = None,
                             # Error bodies are not trusted content. Preserve status/code,
                             # never expose upstream text, credentials or stack traces.
                             payload = {"code": code, "correlationId": cid}
-            except (httpx.HTTPError, ValueError, TypeError):
+            except (httpx.HTTPError, ValueError, TypeError) as exc:
                 status, code = 503, "ACQUISITION_UNAVAILABLE"
                 payload = {"code": code, "correlationId": cid}
+                if isinstance(exc, httpx.TimeoutException):
+                    error_reason = "upstream_timeout"
+                elif isinstance(exc, httpx.HTTPError):
+                    error_reason = "upstream_transport"
+                elif isinstance(exc, json.JSONDecodeError):
+                    error_reason = "invalid_json"
+                elif isinstance(exc, ValueError) and str(exc) == "bounded_response_exceeded":
+                    error_reason = "response_too_large"
+                else:
+                    error_reason = "invalid_contract"
     emit_audit_record(request_id=cid, action="acquisition_control", resource_id=None,
                       resource_type="engine_control", result="success" if status < 300 else "rejected",
-                      http_status=status, error_code=code, provider="acquisition")
+                      http_status=status, error_code=code, error_reason=error_reason,
+                      provider="acquisition")
     return CallToolResult(content=[TextContent(type="text", text=json.dumps({"httpStatus": status, "data": payload}))],
                           is_error=not 200 <= status < 300)
 
