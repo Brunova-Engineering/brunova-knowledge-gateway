@@ -655,6 +655,35 @@ def test_mcp_exposes_only_governed_tools(monkeypatch):
     assert "artifact_ref" in governed_binary_schemas
 
 
+def test_acquisition_exploration_tool_schemas_are_bounded(monkeypatch):
+    monkeypatch.setattr(mcp_module, "get_runtime_gateway", lambda: runtime())
+
+    async def scenario():
+        async with Client(mcp_module.mcp_server) as client:
+            return await client.list_tools()
+
+    tools = run(scenario()).tools
+    by_name = {tool.name: tool for tool in tools}
+    map_schema = by_name["acquisition_get_exploration_map"].input_schema
+    assert set(map_schema["required"]) >= {"cycle_id"}
+    assert set(map_schema["properties"]) == {"cycle_id", "market"}
+    assert map_schema["properties"]["market"]["anyOf"][0]["enum"] == ["MX", "US"]
+
+    command_schema = by_name["acquisition_direct_exploration"].input_schema
+    assert set(command_schema["required"]) >= {
+        "command_id", "cycle_id", "market", "operation", "expected_version", "policy_hash",
+    }
+    assert command_schema["properties"]["operation"]["enum"] == [
+        "EXPLORE", "SELECT_BRANCH", "PAUSE_BRANCH", "MARK_TRAVERSED",
+        "RECORD_LINK_COVERAGE", "LINK_MARKETS", "RECORD_PRESENCE",
+    ]
+    assert command_schema["properties"]["target_kind"]["anyOf"][0]["enum"] == [
+        "MACRO_INDUSTRY", "SPECIALTY", "ACTIVITY", "SUPPLY_CHAIN", "LINK", "COMPANY_LEAD",
+    ]
+    assert {"chain_id", "coverage_market", "directive_ids", "open_gaps", "reason",
+            "counterpart_id", "other_expected_version", "presence_market", "source_url"} <= set(command_schema["properties"])
+
+
 def test_structured_document_production_flow_uses_opaque_refs_and_audits(monkeypatch):
     gateway_runtime = runtime()
     monkeypatch.setattr(mcp_module, "get_runtime_gateway", lambda: gateway_runtime)
