@@ -132,17 +132,60 @@ def register_acquisition_tools(server: Any) -> None:
 
     @server.tool()
     async def acquisition_direct_exploration(command_id: Identifier, cycle_id: Identifier,
-            market: Literal["MX", "US"], operation: Literal["EXPLORE", "SELECT_BRANCH", "PAUSE_BRANCH", "MARK_TRAVERSED"],
-            target_kind: Literal["MACRO_INDUSTRY", "SPECIALTY", "ACTIVITY", "SUPPLY_CHAIN", "LINK", "COMPANY_LEAD"],
-            direction: Annotated[str, Field(min_length=8, max_length=1000)],
+            market: Literal["MX", "US"], operation: Literal[
+                "EXPLORE", "SELECT_BRANCH", "PAUSE_BRANCH", "MARK_TRAVERSED",
+                "RECORD_LINK_COVERAGE", "LINK_MARKETS", "RECORD_PRESENCE"],
             expected_version: Annotated[int, Field(ge=1)], policy_hash: Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")],
-            node_id: Identifier | None = None) -> CallToolResult:
-        """Direct one bounded, non-contact exploration step. The Engine validates the active cycle, mandate, map version and permitted parent-child level. Read the map first. Failed source reads keep leads as UNVERIFIED. This tool cannot admit Accounts or contact prospects."""
+            target_kind: Literal["MACRO_INDUSTRY", "SPECIALTY", "ACTIVITY", "SUPPLY_CHAIN", "LINK", "COMPANY_LEAD"] | None = None,
+            direction: Annotated[str, Field(min_length=8, max_length=1000)] | None = None,
+            node_id: Identifier | None = None, chain_id: Identifier | None = None,
+            coverage_market: Literal["MX", "US"] | None = None,
+            status: Literal["ATTEMPTED", "EXHAUSTED", "OBSERVED", "INFERRED", "UNVERIFIED"] | None = None,
+            directive_ids: Annotated[list[Identifier], Field(min_length=1, max_length=20)] | None = None,
+            open_gaps: list[str] | None = None,
+            reason: str | None = None,
+            counterpart_id: Identifier | None = None,
+            other_expected_version: Annotated[int, Field(ge=1)] | None = None,
+            presence_market: Literal["MX", "US"] | None = None,
+            source_url: Annotated[str, Field(min_length=1, max_length=2000)] | None = None) -> CallToolResult:
+        """Direct one bounded, non-contact exploration step or record governed link coverage, cross-market linkage, or market presence. Read the map first. The Engine validates the active cycle, mandate, map versions and operation-specific evidence. Failed source reads keep leads UNVERIFIED. This tool cannot admit Accounts or contact prospects."""
+        request = {"cycleId": cycle_id, "market": market, "operation": operation,
+                   "expectedVersion": expected_version, "policyHash": policy_hash}
+        if operation in {"EXPLORE", "SELECT_BRANCH", "PAUSE_BRANCH", "MARK_TRAVERSED"}:
+            if target_kind is None or direction is None:
+                raise ValueError("target_kind and direction are required for this exploration operation")
+            request.update({"targetKind": target_kind, "direction": direction, "nodeId": node_id})
+        elif operation == "RECORD_LINK_COVERAGE":
+            if chain_id is None or coverage_market is None or status not in {"ATTEMPTED", "EXHAUSTED"}:
+                raise ValueError("chain_id, coverage_market and coverage status are required")
+            if directive_ids is None or open_gaps is None or reason is None:
+                raise ValueError("directive_ids, open_gaps and reason are required")
+            if not 20 <= len(reason) <= 1000:
+                raise ValueError("reason must contain 20 to 1000 characters")
+            request.update({"chainId": chain_id, "coverageMarket": coverage_market, "status": status,
+                            "directiveIds": directive_ids, "openGaps": open_gaps, "reason": reason})
+        elif operation == "LINK_MARKETS":
+            if chain_id is None or counterpart_id is None or other_expected_version is None or reason is None:
+                raise ValueError("chain_id, counterpart_id, other_expected_version and reason are required")
+            request.update({"chainId": chain_id, "counterpartId": counterpart_id,
+                            "otherExpectedVersion": other_expected_version, "reason": reason})
+        elif operation == "RECORD_PRESENCE":
+            if (node_id is None or presence_market is None
+                    or status not in {"OBSERVED", "INFERRED", "UNVERIFIED"} or reason is None):
+                raise ValueError("node_id, presence_market, presence status and reason are required")
+            if status == "OBSERVED":
+                parsed_source = urlsplit(source_url or "")
+                if (parsed_source.scheme != "https" or not parsed_source.hostname
+                        or parsed_source.username or parsed_source.password):
+                    raise ValueError("an HTTPS source_url is required for observed presence")
+            elif source_url is not None:
+                raise ValueError("source_url is only accepted for observed presence")
+            request.update({"nodeId": node_id, "presenceMarket": presence_market,
+                            "status": status, "reason": reason})
+            if source_url is not None:
+                request["sourceUrl"] = source_url
         return await portal_request("POST", "/exploration/commands", body={
-            "commandId": command_id, "request": {"cycleId": cycle_id, "market": market,
-            "operation": operation, "targetKind": target_kind, "direction": direction,
-            "expectedVersion": expected_version, "policyHash": policy_hash,
-            "nodeId": node_id}})
+            "commandId": command_id, "request": request})
 
     @server.tool()
     async def acquisition_get_discovery() -> CallToolResult:

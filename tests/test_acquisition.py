@@ -185,6 +185,119 @@ def test_discovery_invalid_json_is_classified_only_in_audit(monkeypatch):
     assert audit_records[-1]["error_reason"] == "invalid_json"
 
 
+def test_exploration_map_preserves_output_arrays_and_direct_exploration_forwards_contract(monkeypatch):
+    calls = []
+    map_result = {
+        "schemaVersion": "1",
+        "industries": [{"id": "industry-1"}],
+        "companies": [{"id": "company-1", "epistemicState": "UNVERIFIED"}],
+        "pendingWork": [{"id": "work-1"}],
+        "provenance": [{"source": "synthetic"}],
+        "chainCoverage": [{"id": "coverage-1"}],
+        "governance": [{"id": "governance-1"}],
+        "marketPresence": [{"id": "presence-1"}],
+        "chainEquivalences": [{"id": "equivalence-1"}],
+    }
+
+    def handler(request):
+        calls.append(request)
+        if request.method == "GET":
+            assert request.url.path.endswith("/exploration/map")
+            assert dict(request.url.params) == {"cycleId": "cycle-1", "market": "MX"}
+            return httpx.Response(200, json=map_result)
+        assert request.method == "POST"
+        assert request.url.path.endswith("/exploration/commands")
+        return httpx.Response(202, json={"commandStatus": "accepted"})
+
+    configure(monkeypatch, handler)
+    result = unpack(asyncio.run(mcp_server.call_tool("acquisition_get_exploration_map", {
+        "cycle_id": "cycle-1", "market": "MX",
+    })))
+    assert result["data"] == map_result
+    assert all(isinstance(result["data"][key], list) for key in (
+        "industries", "companies", "pendingWork", "provenance", "chainCoverage",
+        "governance", "marketPresence", "chainEquivalences",
+    ))
+
+    args = {
+        "command_id": "explore-command-1",
+        "cycle_id": "cycle-1",
+        "market": "US",
+        "operation": "EXPLORE",
+        "target_kind": "SPECIALTY",
+        "direction": "Explore a bounded synthetic specialty branch.",
+        "expected_version": 3,
+        "policy_hash": "a" * 64,
+        "node_id": "specialty-1",
+    }
+    posted = unpack(asyncio.run(mcp_server.call_tool("acquisition_direct_exploration", args)))
+    assert posted["httpStatus"] == 202
+    request = calls[-1]
+    assert json.loads(request.content) == {
+        "commandId": "explore-command-1",
+        "request": {
+            "cycleId": "cycle-1", "market": "US", "operation": "EXPLORE",
+            "targetKind": "SPECIALTY", "direction": args["direction"],
+            "expectedVersion": 3, "policyHash": "a" * 64, "nodeId": "specialty-1",
+        },
+    }
+    call_count = len(calls)
+    invalid = args | {"operation": "CONTACT_PROSPECT"}
+    assert asyncio.run(mcp_server.call_tool("acquisition_direct_exploration", invalid)).is_error
+    assert len(calls) == call_count
+
+
+def test_direct_exploration_forwards_governed_link_operations_and_rejects_missing_fields(monkeypatch):
+    calls = []
+
+    def handler(request):
+        calls.append(json.loads(request.content))
+        return httpx.Response(202, json={"commandStatus": "accepted"})
+
+    configure(monkeypatch, handler)
+    common = {"command_id": "explore-op", "cycle_id": "cycle-1", "market": "MX",
+              "expected_version": 4, "policy_hash": "b" * 64}
+    cases = [
+        ({"operation": "RECORD_LINK_COVERAGE", "chain_id": "chain-1", "coverage_market": "US",
+          "status": "EXHAUSTED", "directive_ids": ["directive-1"], "open_gaps": ["No independent source"],
+          "reason": "The bounded source search did not establish additional links."},
+         {"chainId": "chain-1", "coverageMarket": "US", "status": "EXHAUSTED",
+          "directiveIds": ["directive-1"], "openGaps": ["No independent source"],
+          "reason": "The bounded source search did not establish additional links."}),
+        ({"operation": "LINK_MARKETS", "chain_id": "chain-1", "counterpart_id": "chain-us-1",
+          "other_expected_version": 2, "reason": "Independent evidence supports this cross-market equivalence."},
+         {"chainId": "chain-1", "counterpartId": "chain-us-1", "otherExpectedVersion": 2,
+          "reason": "Independent evidence supports this cross-market equivalence."}),
+        ({"operation": "RECORD_PRESENCE", "node_id": "company-1", "presence_market": "US",
+          "status": "OBSERVED", "source_url": "https://example.test/presence",
+          "reason": "The cited public page explicitly lists this location."},
+         {"nodeId": "company-1", "presenceMarket": "US", "status": "OBSERVED",
+          "sourceUrl": "https://example.test/presence",
+          "reason": "The cited public page explicitly lists this location."}),
+    ]
+    for index, (specific, expected) in enumerate(cases):
+        args = common | specific | {"command_id": f"explore-op-{index}"}
+        result = unpack(asyncio.run(mcp_server.call_tool("acquisition_direct_exploration", args)))
+        assert result["httpStatus"] == 202
+        envelope = calls[-1]
+        assert envelope["commandId"] == args["command_id"]
+        assert envelope["request"] == {
+            "cycleId": "cycle-1", "market": "MX", "operation": specific["operation"],
+            "expectedVersion": 4, "policyHash": "b" * 64, **expected,
+        }
+
+    count = len(calls)
+    missing = common | {"operation": "RECORD_PRESENCE", "node_id": "company-1",
+                        "presence_market": "US", "status": "UNKNOWN"}
+    assert asyncio.run(mcp_server.call_tool("acquisition_direct_exploration", missing)).is_error
+    assert len(calls) == count
+    observed_without_source = common | {"operation": "RECORD_PRESENCE", "node_id": "company-1",
+                                       "presence_market": "US", "status": "OBSERVED",
+                                       "reason": "The cited public page explicitly lists this location."}
+    assert asyncio.run(mcp_server.call_tool("acquisition_direct_exploration", observed_without_source)).is_error
+    assert len(calls) == count
+
+
 def test_signal_accepts_only_canonical_service_provenance():
     from tests.test_agent_signals import acquisition_dict
     from app.agent_signals import AgentSignalPayload
