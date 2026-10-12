@@ -35,6 +35,7 @@ TOOLS = frozenset({
     "acquisition_get_operating_model",
     "acquisition_get_activation_preflight",
     "acquisition_get_discovery",
+    "acquisition_get_exploration_map", "acquisition_direct_exploration",
     "acquisition_prepare_conversation", "acquisition_bind_candidate_message",
     "acquisition_request_discovery_planning",
     "acquisition_request_authenticated_research",
@@ -123,6 +124,26 @@ async def portal_request(method: str, path: str, *, params: dict | None = None,
 
 
 def register_acquisition_tools(server: Any) -> None:
+    @server.tool()
+    async def acquisition_get_exploration_map(cycle_id: Identifier,
+            market: Literal["MX", "US"] | None = None) -> CallToolResult:
+        """Read the current industry-to-company exploration map, pending work and provenance. An UNVERIFIED lead is retained for follow-up and is not a verified supply-chain relationship. Management read capability only."""
+        return await portal_request("GET", "/exploration/map", params={"cycleId": cycle_id, "market": market})
+
+    @server.tool()
+    async def acquisition_direct_exploration(command_id: Identifier, cycle_id: Identifier,
+            market: Literal["MX", "US"], operation: Literal["EXPLORE", "SELECT_BRANCH", "PAUSE_BRANCH", "MARK_TRAVERSED"],
+            target_kind: Literal["MACRO_INDUSTRY", "SPECIALTY", "ACTIVITY", "SUPPLY_CHAIN", "LINK", "COMPANY_LEAD"],
+            direction: Annotated[str, Field(min_length=8, max_length=1000)],
+            expected_version: Annotated[int, Field(ge=1)], policy_hash: Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")],
+            node_id: Identifier | None = None) -> CallToolResult:
+        """Direct one bounded, non-contact exploration step. The Engine validates the active cycle, mandate, map version and permitted parent-child level. Read the map first. Failed source reads keep leads as UNVERIFIED. This tool cannot admit Accounts or contact prospects."""
+        return await portal_request("POST", "/exploration/commands", body={
+            "commandId": command_id, "request": {"cycleId": cycle_id, "market": market,
+            "operation": operation, "targetKind": target_kind, "direction": direction,
+            "expectedVersion": expected_version, "policyHash": policy_hash,
+            "nodeId": node_id}})
+
     @server.tool()
     async def acquisition_get_discovery() -> CallToolResult:
         """Inspect authoritative Discovery planning, source health/yield and durable candidates BEFORE Account admission. Explain what was observed, unresolved identity, missing evidence and pending work; identity is not qualification. Counts and bounded displayed samples differ. Source failure/empty results do not prove absence of market opportunity. No company list is needed to begin an authorized active Cycle; no activation or provider action occurs here."""
