@@ -36,6 +36,8 @@ TOOLS = frozenset({
     "acquisition_get_activation_preflight",
     "acquisition_get_discovery",
     "acquisition_get_exploration_map", "acquisition_direct_exploration",
+    "acquisition_manage_company_profile",
+    "acquisition_reconcile_company_identity",
     "acquisition_prepare_conversation", "acquisition_bind_candidate_message",
     "acquisition_request_discovery_planning",
     "acquisition_request_authenticated_research",
@@ -127,7 +129,7 @@ def register_acquisition_tools(server: Any) -> None:
     @server.tool()
     async def acquisition_get_exploration_map(cycle_id: Identifier,
             market: Literal["MX", "US"] | None = None) -> CallToolResult:
-        """Read the current industry-to-company exploration map, pending work and provenance. An UNVERIFIED lead is retained for follow-up and is not a verified supply-chain relationship. Management read capability only."""
+        """Read the current industry-to-company exploration map, company profiles, pending work and provenance. An UNVERIFIED lead is retained for follow-up and is not a verified supply-chain relationship. Management read capability only."""
         return await portal_request("GET", "/exploration/map", params={"cycleId": cycle_id, "market": market})
 
     @server.tool()
@@ -185,6 +187,124 @@ def register_acquisition_tools(server: Any) -> None:
             if source_url is not None:
                 request["sourceUrl"] = source_url
         return await portal_request("POST", "/exploration/commands", body={
+            "commandId": command_id, "request": request})
+
+    @server.tool()
+    async def acquisition_manage_company_profile(command_id: Annotated[str, Field(
+            min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")],
+            cycle_id: Identifier, market: Literal["MX", "US"],
+            operation: Literal["SET_FIELD", "SET_TAGS"], company_id: Identifier,
+            expected_version: Annotated[int, Field(ge=1)],
+            field_key: Literal[
+                "canonicalName", "alternateNames", "websiteOrRegistry", "disambiguation",
+                "activity", "function", "markets", "locations", "scaleSignal",
+                "fitProcess", "fitHypothesis", "channel", "interlocutorRole",
+                "priorContact", "restrictions",
+            ] | None = None,
+            field_dimension: Literal["identity", "activity", "presence", "fit", "outreach"] | None = None,
+            field_status: Literal["KNOWN", "HYPOTHESIS", "PENDING"] | None = None,
+            field_value: Annotated[str, Field(max_length=1000)] | None = None,
+            field_source_url: Annotated[str, Field(max_length=1000)] | None = None,
+            field_observed_at: Annotated[str, Field(max_length=100)] | None = None,
+            field_next_question: Annotated[str, Field(max_length=500)] | None = None,
+            tags: Annotated[list[Annotated[str, Field(min_length=1, max_length=80)]],
+                            Field(max_length=30)] | None = None) -> CallToolResult:
+        """Set one bounded company-profile field or replace its bounded tags. Read the exploration map first and pass its current map version. Engine validates active scope, company root, version and durable receipt. Management capability only; this records profile data and has no external effect."""
+        request: dict[str, Any] = {
+            "cycleId": cycle_id, "market": market, "operation": operation,
+            "companyId": company_id, "expectedVersion": expected_version,
+        }
+        field_args = (field_key, field_dimension, field_status, field_value,
+                      field_source_url, field_observed_at, field_next_question)
+        if operation == "SET_FIELD":
+            if field_key is None or field_dimension is None or field_status is None:
+                raise ValueError("field_key, field_dimension and field_status are required for SET_FIELD")
+            dimension_by_key = {
+                "canonicalName": "identity", "alternateNames": "identity",
+                "websiteOrRegistry": "identity", "disambiguation": "identity",
+                "activity": "activity", "function": "activity",
+                "markets": "presence", "locations": "presence", "scaleSignal": "presence",
+                "fitProcess": "fit", "fitHypothesis": "fit",
+                "channel": "outreach", "interlocutorRole": "outreach",
+                "priorContact": "outreach", "restrictions": "outreach",
+            }
+            if dimension_by_key[field_key] != field_dimension:
+                raise ValueError("field_dimension does not match field_key")
+            if field_status != "PENDING" and (field_value is None or not field_value.strip()):
+                raise ValueError("field_value is required for KNOWN and HYPOTHESIS fields")
+            if field_status == "PENDING" and field_value is not None:
+                raise ValueError("field_value is not accepted for PENDING fields")
+            if field_source_url is not None:
+                parsed_source = urlsplit(field_source_url)
+                if (parsed_source.scheme != "https" or not parsed_source.hostname
+                        or parsed_source.username or parsed_source.password):
+                    raise ValueError("field_source_url must be an HTTPS URL")
+            if tags is not None:
+                raise ValueError("tags are only accepted for SET_TAGS")
+            request["field"] = {
+                "key": field_key, "dimension": field_dimension, "value": field_value,
+                "status": field_status, "sourceUrl": field_source_url,
+                "observedAt": field_observed_at, "nextQuestion": field_next_question,
+            }
+        else:
+            if tags is None:
+                raise ValueError("tags are required for SET_TAGS")
+            if any(value is not None for value in field_args):
+                raise ValueError("field arguments are only accepted for SET_FIELD")
+            request["tags"] = tags
+        return await portal_request("POST", "/exploration/company/commands", body={
+            "commandId": command_id, "request": request})
+
+    @server.tool()
+    async def acquisition_reconcile_company_identity(
+            command_id: Annotated[str, Field(min_length=1, max_length=200,
+                                             pattern=r"^[A-Za-z0-9._:-]+$")],
+            cycle_id: Identifier,
+            operation: Literal["LINK_LEADS", "UNLINK_LEAD", "SPLIT_ALIAS"],
+            reason: Annotated[str, Field(min_length=8, max_length=500)],
+            expected_version_mx: Annotated[int, Field(ge=1, le=999_999_999)] | None = None,
+            expected_version_us: Annotated[int, Field(ge=1, le=999_999_999)] | None = None,
+            canonical_company_id: Identifier | None = None,
+            member_company_id: Identifier | None = None,
+            company_id: Identifier | None = None,
+            source_url: Annotated[str, Field(max_length=1000)] | None = None) -> CallToolResult:
+        """Link or unlink exact company lead roots, or split an existing alias. Supply the current map version for every touched market from the read map. Link/split require an HTTPS evidence URL; names alone never reconcile identity. Engine persists the versioned command receipt. Management capability only."""
+        if not reason.strip():
+            raise ValueError("reason must not be blank")
+        versions = {market: version for market, version in (
+            ("MX", expected_version_mx), ("US", expected_version_us)
+        ) if version is not None}
+        if not versions:
+            raise ValueError("at least one expected market version is required")
+
+        request: dict[str, Any] = {
+            "cycleId": cycle_id, "operation": operation, "reason": reason,
+            "expectedVersions": versions,
+        }
+        if operation == "SPLIT_ALIAS":
+            if company_id is None or canonical_company_id is not None or member_company_id is not None:
+                raise ValueError("SPLIT_ALIAS requires only company_id")
+            if len(versions) != 1:
+                raise ValueError("SPLIT_ALIAS requires exactly one expected market version")
+            request["companyId"] = company_id
+        else:
+            if canonical_company_id is None or member_company_id is None or company_id is not None:
+                raise ValueError("link operations require canonical_company_id and member_company_id")
+            if canonical_company_id == member_company_id:
+                raise ValueError("a company lead cannot be linked to itself")
+            request.update({"canonicalCompanyId": canonical_company_id,
+                            "memberCompanyId": member_company_id})
+
+        if operation in {"LINK_LEADS", "SPLIT_ALIAS"}:
+            parsed_source = urlsplit(source_url or "")
+            if (parsed_source.scheme != "https" or not parsed_source.hostname
+                    or parsed_source.username or parsed_source.password):
+                raise ValueError("an HTTPS source_url is required for this identity operation")
+            request["sourceUrl"] = source_url
+        elif source_url is not None:
+            raise ValueError("source_url is only accepted for LINK_LEADS and SPLIT_ALIAS")
+
+        return await portal_request("POST", "/exploration/company/commands", body={
             "commandId": command_id, "request": request})
 
     @server.tool()

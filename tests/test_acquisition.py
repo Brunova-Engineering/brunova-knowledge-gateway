@@ -102,12 +102,19 @@ def test_bounds_prohibited_tools_and_scoped_principals(monkeypatch):
     def unexpected(request):
         raise AssertionError("must not call Portal")
     configure(monkeypatch, unexpected)
+    assert "acquisition_manage_company_profile" in acquisition.TOOLS
+    assert _tool_authorization_error(Principal.management(), "acquisition_manage_company_profile") is None
+    assert "acquisition_reconcile_company_identity" in acquisition.TOOLS
+    assert _tool_authorization_error(Principal.management(), "acquisition_reconcile_company_identity") is None
+    from dataclasses import replace
+    developer = replace(Principal.management(), type="developer")
+    assert _tool_authorization_error(developer, "acquisition_manage_company_profile") == "tool_denied"
+    assert _tool_authorization_error(developer, "acquisition_reconcile_company_identity") == "tool_denied"
     for name in ["acquisition_sql", "acquisition_patch", "acquisition_set_priority", "acquisition_send"]:
         assert _tool_authorization_error(Principal.management(), name) == "tool_denied"
         assert asyncio.run(mcp_server.call_tool(name, {})).is_error
     assert asyncio.run(mcp_server.call_tool("acquisition_list_cycles", {"limit": 101})).is_error
     assert asyncio.run(mcp_server.call_tool("acquisition_get_cycle", {"cycle_id": "../auth/session"})).is_error
-    from dataclasses import replace
     principal = replace(Principal.management(), type="developer")
     bound = bind_principal(principal)
     try:
@@ -191,6 +198,19 @@ def test_exploration_map_preserves_output_arrays_and_direct_exploration_forwards
         "schemaVersion": "1",
         "industries": [{"id": "industry-1"}],
         "companies": [{"id": "company-1", "epistemicState": "UNVERIFIED"}],
+        "companyProfiles": [{
+            "companyId": "company-1", "cycleId": "cycle-1", "displayName": "Example Co",
+            "identityStatus": "UNRESOLVED", "aliases": [], "leadNodeIds": ["company-1"],
+            "fields": [{"key": "activity", "dimension": "activity", "value": "Food distribution",
+                        "status": "HYPOTHESIS", "sourceUrl": "https://example.test/about",
+                        "observedAt": "2026-10-13T10:00:00Z", "nextQuestion": "Which regions?"}],
+            "tags": ["regional"],
+            "links": [{"linkId": "link-1", "market": "MX", "function": "distributor",
+                       "evidenceStatus": "UNVERIFIED"}],
+            "disposition": [{"scope": "LINK", "branchId": "link-1", "status": "DISCARDED",
+                             "reason": "Not supported by available evidence.", "actorId": "human-1",
+                             "updatedAt": "2026-10-13T10:00:00Z"}],
+        }],
         "pendingWork": [{"id": "work-1"}],
         "provenance": [{"source": "synthetic"}],
         "chainCoverage": [{"id": "coverage-1"}],
@@ -214,8 +234,9 @@ def test_exploration_map_preserves_output_arrays_and_direct_exploration_forwards
         "cycle_id": "cycle-1", "market": "MX",
     })))
     assert result["data"] == map_result
+    assert result["data"]["companyProfiles"] == map_result["companyProfiles"]
     assert all(isinstance(result["data"][key], list) for key in (
-        "industries", "companies", "pendingWork", "provenance", "chainCoverage",
+        "industries", "companies", "companyProfiles", "pendingWork", "provenance", "chainCoverage",
         "governance", "marketPresence", "chainEquivalences",
     ))
 
@@ -295,6 +316,131 @@ def test_direct_exploration_forwards_governed_link_operations_and_rejects_missin
                                        "presence_market": "US", "status": "OBSERVED",
                                        "reason": "The cited public page explicitly lists this location."}
     assert asyncio.run(mcp_server.call_tool("acquisition_direct_exploration", observed_without_source)).is_error
+    assert len(calls) == count
+
+
+def test_company_profile_commands_forward_only_bounded_engine_contract(monkeypatch):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        assert request.method == "POST"
+        assert request.url.path.endswith("/exploration/company/commands")
+        return httpx.Response(202, json={"status": "accepted", "externalEffect": False})
+
+    configure(monkeypatch, handler)
+    common = {
+        "command_id": "profile-command-1", "cycle_id": "cycle-1", "market": "MX",
+        "company_id": "company-1", "expected_version": 9,
+    }
+    field = {
+        "operation": "SET_FIELD", "field_key": "activity", "field_dimension": "activity",
+        "field_status": "HYPOTHESIS", "field_value": "Regional food distribution",
+        "field_source_url": "https://example.test/about", "field_observed_at": "2026-10-13T10:00:00Z",
+        "field_next_question": "Which regions are served?",
+    }
+    result = unpack(asyncio.run(mcp_server.call_tool("acquisition_manage_company_profile", common | field)))
+    assert result["httpStatus"] == 202
+    assert json.loads(calls[-1].content) == {
+        "commandId": "profile-command-1",
+        "request": {
+            "cycleId": "cycle-1", "market": "MX", "operation": "SET_FIELD",
+            "companyId": "company-1", "expectedVersion": 9,
+            "field": {
+                "key": "activity", "dimension": "activity", "value": "Regional food distribution",
+                "status": "HYPOTHESIS", "sourceUrl": "https://example.test/about",
+                "observedAt": "2026-10-13T10:00:00Z", "nextQuestion": "Which regions are served?",
+            },
+        },
+    }
+
+    tags = common | {"command_id": "profile-command-2", "operation": "SET_TAGS",
+                     "tags": ["exporter", "regional"]}
+    result = unpack(asyncio.run(mcp_server.call_tool("acquisition_manage_company_profile", tags)))
+    assert result["httpStatus"] == 202
+    assert json.loads(calls[-1].content) == {
+        "commandId": "profile-command-2",
+        "request": {
+            "cycleId": "cycle-1", "market": "MX", "operation": "SET_TAGS",
+            "companyId": "company-1", "expectedVersion": 9,
+            "tags": ["exporter", "regional"],
+        },
+    }
+
+    count = len(calls)
+    for invalid in [
+        common | {"operation": "DELETE_COMPANY"},
+        common | {"operation": "SET_FIELD", "field_key": "madeUp", "field_dimension": "activity",
+                  "field_status": "KNOWN", "field_value": "Unknown field key"},
+        common | {"operation": "SET_FIELD", "field_key": "activity", "field_dimension": "identity",
+                  "field_status": "KNOWN", "field_value": "Wrong dimension"},
+        common | {"operation": "SET_TAGS", "tags": ["x" * 81]},
+    ]:
+        assert asyncio.run(mcp_server.call_tool("acquisition_manage_company_profile", invalid)).is_error
+    assert len(calls) == count
+
+
+def test_company_identity_commands_use_fixed_engine_route_and_version_receipts(monkeypatch):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        assert request.method == "POST"
+        assert request.url.path.endswith("/exploration/company/commands")
+        return httpx.Response(202, json={"status": "accepted", "externalEffect": False})
+
+    configure(monkeypatch, handler)
+    common = {"cycle_id": "cycle-1", "reason": "Official registry identifies the exact organization."}
+    cases = [
+        ({"command_id": "identity-link", "operation": "LINK_LEADS",
+          "canonical_company_id": "lead-mx", "member_company_id": "lead-us",
+          "expected_version_mx": 4, "expected_version_us": 7,
+          "source_url": "https://registry.example.test/company/1"},
+         {"cycleId": "cycle-1", "operation": "LINK_LEADS",
+          "canonicalCompanyId": "lead-mx", "memberCompanyId": "lead-us",
+          "reason": "Official registry identifies the exact organization.",
+          "sourceUrl": "https://registry.example.test/company/1",
+          "expectedVersions": {"MX": 4, "US": 7}}),
+        ({"command_id": "identity-unlink", "operation": "UNLINK_LEAD",
+          "canonical_company_id": "lead-mx", "member_company_id": "lead-us",
+          "expected_version_mx": 5, "expected_version_us": 8},
+         {"cycleId": "cycle-1", "operation": "UNLINK_LEAD",
+          "canonicalCompanyId": "lead-mx", "memberCompanyId": "lead-us",
+          "reason": "Official registry identifies the exact organization.",
+          "expectedVersions": {"MX": 5, "US": 8}}),
+        ({"command_id": "identity-split", "operation": "SPLIT_ALIAS",
+          "company_id": "lead-us", "expected_version_us": 9,
+          "source_url": "https://registry.example.test/company/2"},
+         {"cycleId": "cycle-1", "operation": "SPLIT_ALIAS", "companyId": "lead-us",
+          "reason": "Official registry identifies the exact organization.",
+          "sourceUrl": "https://registry.example.test/company/2",
+          "expectedVersions": {"US": 9}}),
+    ]
+    for args, expected_request in cases:
+        result = unpack(asyncio.run(mcp_server.call_tool(
+            "acquisition_reconcile_company_identity", common | args)))
+        assert result["httpStatus"] == 202
+        assert json.loads(calls[-1].content) == {
+            "commandId": args["command_id"], "request": expected_request,
+        }
+
+    count = len(calls)
+    invalid_requests = [
+        common | {"command_id": "invalid-no-evidence", "operation": "LINK_LEADS",
+                  "canonical_company_id": "lead-mx", "member_company_id": "lead-us",
+                  "expected_version_mx": 1, "expected_version_us": 1},
+        common | {"command_id": "invalid-unlink-source", "operation": "UNLINK_LEAD",
+                  "canonical_company_id": "lead-mx", "member_company_id": "lead-us",
+                  "expected_version_mx": 1, "source_url": "https://example.test"},
+        common | {"command_id": "invalid-split-version", "operation": "SPLIT_ALIAS",
+                  "company_id": "lead-us", "expected_version_mx": 1,
+                  "expected_version_us": 2, "source_url": "https://example.test"},
+        common | {"command_id": "invalid-operation", "operation": "MERGE_BY_NAME",
+                  "canonical_company_id": "lead-mx", "member_company_id": "lead-us",
+                  "expected_version_mx": 1, "source_url": "https://example.test"},
+    ]
+    for invalid in invalid_requests:
+        assert asyncio.run(mcp_server.call_tool("acquisition_reconcile_company_identity", invalid)).is_error
     assert len(calls) == count
 
 

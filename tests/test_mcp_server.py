@@ -532,6 +532,7 @@ def test_mcp_exposes_only_governed_tools(monkeypatch):
         "acquisition_get_operating_model",
         "acquisition_get_activation_preflight",
         "acquisition_get_discovery", "acquisition_get_exploration_map", "acquisition_direct_exploration",
+        "acquisition_manage_company_profile", "acquisition_reconcile_company_identity",
         "acquisition_prepare_conversation", "acquisition_bind_candidate_message",
         "acquisition_request_discovery_planning",
         "acquisition_archive_candidate", "acquisition_restore_candidate",
@@ -682,6 +683,30 @@ def test_acquisition_exploration_tool_schemas_are_bounded(monkeypatch):
     ]
     assert {"chain_id", "coverage_market", "directive_ids", "open_gaps", "reason",
             "counterpart_id", "other_expected_version", "presence_market", "source_url"} <= set(command_schema["properties"])
+
+    profile_schema = by_name["acquisition_manage_company_profile"].input_schema
+    assert set(profile_schema["required"]) >= {
+        "command_id", "cycle_id", "market", "operation", "company_id", "expected_version",
+    }
+    assert profile_schema["properties"]["operation"]["enum"] == ["SET_FIELD", "SET_TAGS"]
+    assert profile_schema["properties"]["field_key"]["anyOf"][0]["enum"] == [
+        "canonicalName", "alternateNames", "websiteOrRegistry", "disambiguation",
+        "activity", "function", "markets", "locations", "scaleSignal", "fitProcess",
+        "fitHypothesis", "channel", "interlocutorRole", "priorContact", "restrictions",
+    ]
+    assert profile_schema["properties"]["field_status"]["anyOf"][0]["enum"] == [
+        "KNOWN", "HYPOTHESIS", "PENDING",
+    ]
+
+    identity_schema = by_name["acquisition_reconcile_company_identity"].input_schema
+    assert identity_schema["properties"]["operation"]["enum"] == [
+        "LINK_LEADS", "UNLINK_LEAD", "SPLIT_ALIAS",
+    ]
+    assert identity_schema["properties"]["reason"]["minLength"] == 8
+    assert identity_schema["properties"]["reason"]["maxLength"] == 500
+    assert identity_schema["properties"]["source_url"]["anyOf"][0]["maxLength"] == 1000
+    assert identity_schema["properties"]["expected_version_mx"]["anyOf"][0]["maximum"] == 999_999_999
+    assert identity_schema["properties"]["expected_version_us"]["anyOf"][0]["maximum"] == 999_999_999
 
 
 def test_structured_document_production_flow_uses_opaque_refs_and_audits(monkeypatch):
