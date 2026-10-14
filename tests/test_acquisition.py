@@ -172,10 +172,14 @@ def test_candidate_route_review_preserves_exact_attempt(monkeypatch):
         "cycleId": "cycle", "companyId": "company", "linkId": "selected-link",
         "fieldKey": "FUNCTION_IN_LINK", "dimension": "WEB_FIRST",
         "basedOnAttemptId": "attempt-one", "expectedStageVersion": 2,
-        "reason": args["reason"]}}
+        "reason": args["reason"], "reviewMode": "SOURCE_READ"}}
+    no_source = unpack(asyncio.run(mcp_server.call_tool("acquisition_review_candidate_enrichment_route",
+                                  args | {"command_id": "synthetic-no-source", "review_mode": "NO_ATTRIBUTED_SOURCE"})))
+    assert no_source["httpStatus"] == 202
+    assert json.loads(calls[1].content)["request"]["reviewMode"] == "NO_ATTRIBUTED_SOURCE"
     assert asyncio.run(mcp_server.call_tool("acquisition_review_candidate_enrichment_route",
                                      args | {"based_on_attempt_id": ""})).is_error
-    assert len(calls) == 1
+    assert len(calls) == 2
 
 
 def test_retries_preserve_command_envelope_and_conflicts(monkeypatch):

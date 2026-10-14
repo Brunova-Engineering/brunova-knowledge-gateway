@@ -163,13 +163,14 @@ def register_acquisition_tools(server: Any) -> None:
             field_key: Literal["IDENTITY", "OPERATION", "FUNCTION_IN_LINK", "OPERATING_MARKET", "SCALE_SIGNAL", "ACCESS_ROUTE"],
             dimension: Literal["COMPANY_FIRST", "WEB_FIRST", "JOB_FIRST", "SOCIAL_FIRST"],
             based_on_attempt_id: Identifier, expected_stage_version: Annotated[int, Field(ge=1)],
-            reason: Annotated[str, Field(min_length=20, max_length=480)]) -> CallToolResult:
-        """Record Panky's evidence-bound review that one successfully read source route produced no sufficient field signal. Requires an exact prior attempt and original page read; a technical failure or AI-only response cannot count as exhaustion. Does not close a candidate by itself."""
+            reason: Annotated[str, Field(min_length=20, max_length=480)],
+            review_mode: Literal["SOURCE_READ", "NO_ATTRIBUTED_SOURCE"] = "SOURCE_READ") -> CallToolResult:
+        """Record Panky's evidence-bound review of one field and source dimension. SOURCE_READ requires an exact original-page attempt. NO_ATTRIBUTED_SOURCE requires two distinct successful AI source-discovery attempts without citations and no original read in that dimension. Technical failure cannot count as exhaustion. This does not close a candidate by itself."""
         return await portal_request("POST", "/exploration/enrichment-route-reviews", body={
             "commandId": command_id, "request": {"cycleId": cycle_id, "companyId": company_id,
                 "linkId": link_id, "fieldKey": field_key, "dimension": dimension,
                 "basedOnAttemptId": based_on_attempt_id, "expectedStageVersion": expected_stage_version,
-                "reason": reason}})
+                "reason": reason, "reviewMode": review_mode}})
 
     @server.tool()
     async def acquisition_direct_exploration(command_id: Identifier, cycle_id: Identifier,
