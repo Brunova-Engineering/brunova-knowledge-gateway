@@ -35,7 +35,8 @@ TOOLS = frozenset({
     "acquisition_get_operating_model",
     "acquisition_get_activation_preflight",
     "acquisition_get_discovery",
-    "acquisition_get_exploration_map", "acquisition_direct_exploration",
+    "acquisition_get_exploration_map", "acquisition_direct_exploration", "acquisition_direct_candidate_enrichment",
+    "acquisition_review_candidate_enrichment_route",
     "acquisition_manage_company_profile",
     "acquisition_reconcile_company_identity",
     "acquisition_prepare_conversation", "acquisition_bind_candidate_message",
@@ -131,6 +132,45 @@ def register_acquisition_tools(server: Any) -> None:
             market: Literal["MX", "US"] | None = None) -> CallToolResult:
         """Read the current industry-to-company exploration map, company profiles, pending work and provenance. An UNVERIFIED lead is retained for follow-up and is not a verified supply-chain relationship. Management read capability only."""
         return await portal_request("GET", "/exploration/map", params={"cycleId": cycle_id, "market": market})
+
+    @server.tool()
+    async def acquisition_direct_candidate_enrichment(
+            command_id: Identifier, cycle_id: Identifier, company_id: Identifier, link_id: Identifier,
+            field_key: Literal["IDENTITY", "OPERATION", "FUNCTION_IN_LINK", "OPERATING_MARKET", "SCALE_SIGNAL", "ACCESS_ROUTE"],
+            dimension: Literal["COMPANY_FIRST", "WEB_FIRST", "JOB_FIRST", "SOCIAL_FIRST"],
+            question: Annotated[str, Field(min_length=8, max_length=500)],
+            expected_stage_version: Annotated[int, Field(ge=1)],
+            reason: Annotated[str, Field(min_length=8, max_length=1000)],
+            source_uri: Annotated[str, Field(min_length=9, max_length=1000)] | None = None) -> CallToolResult:
+        """Queue one candidate-bound, non-contact enrichment question. Web First uses Brunova Chrome AI Mode to find sources, then reads original pages. Other dimensions require an existing attributed HTTPS source. Read the current company stage/version first; this tool does not confirm an AI answer as a company fact."""
+        if dimension == "WEB_FIRST" and source_uri is not None:
+            raise ValueError("Web First takes no source URI")
+        if dimension != "WEB_FIRST":
+            parsed = urlsplit(source_uri or "")
+            if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+                raise ValueError("an attributed HTTPS source URI is required")
+        request = {"cycleId": cycle_id, "companyId": company_id, "linkId": link_id,
+                   "fieldKey": field_key, "dimension": dimension, "question": question,
+                   "expectedStageVersion": expected_stage_version, "reason": reason}
+        if source_uri is not None:
+            request["sourceUri"] = source_uri
+        return await portal_request("POST", "/exploration/enrichment-directions", body={
+            "commandId": command_id, "request": request})
+
+    @server.tool()
+    async def acquisition_review_candidate_enrichment_route(
+            command_id: Identifier, cycle_id: Identifier, company_id: Identifier, link_id: Identifier,
+            field_key: Literal["IDENTITY", "OPERATION", "FUNCTION_IN_LINK", "OPERATING_MARKET", "SCALE_SIGNAL", "ACCESS_ROUTE"],
+            dimension: Literal["COMPANY_FIRST", "WEB_FIRST", "JOB_FIRST", "SOCIAL_FIRST"],
+            based_on_attempt_id: Identifier, expected_stage_version: Annotated[int, Field(ge=1)],
+            reason: Annotated[str, Field(min_length=20, max_length=480)],
+            review_mode: Literal["SOURCE_READ", "NO_ATTRIBUTED_SOURCE"] = "SOURCE_READ") -> CallToolResult:
+        """Record Panky's evidence-bound review of one field and source dimension. SOURCE_READ requires an exact original-page attempt. NO_ATTRIBUTED_SOURCE requires two distinct successful AI source-discovery attempts without citations and no original read in that dimension. Technical failure cannot count as exhaustion. This does not close a candidate by itself."""
+        return await portal_request("POST", "/exploration/enrichment-route-reviews", body={
+            "commandId": command_id, "request": {"cycleId": cycle_id, "companyId": company_id,
+                "linkId": link_id, "fieldKey": field_key, "dimension": dimension,
+                "basedOnAttemptId": based_on_attempt_id, "expectedStageVersion": expected_stage_version,
+                "reason": reason, "reviewMode": review_mode}})
 
     @server.tool()
     async def acquisition_direct_exploration(command_id: Identifier, cycle_id: Identifier,
