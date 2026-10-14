@@ -36,6 +36,7 @@ TOOLS = frozenset({
     "acquisition_get_activation_preflight",
     "acquisition_get_discovery",
     "acquisition_get_exploration_map", "acquisition_direct_exploration", "acquisition_direct_candidate_enrichment",
+    "acquisition_review_candidate_enrichment_route",
     "acquisition_manage_company_profile",
     "acquisition_reconcile_company_identity",
     "acquisition_prepare_conversation", "acquisition_bind_candidate_message",
@@ -155,6 +156,20 @@ def register_acquisition_tools(server: Any) -> None:
             request["sourceUri"] = source_uri
         return await portal_request("POST", "/exploration/enrichment-directions", body={
             "commandId": command_id, "request": request})
+
+    @server.tool()
+    async def acquisition_review_candidate_enrichment_route(
+            command_id: Identifier, cycle_id: Identifier, company_id: Identifier, link_id: Identifier,
+            field_key: Literal["IDENTITY", "OPERATION", "FUNCTION_IN_LINK", "OPERATING_MARKET", "SCALE_SIGNAL", "ACCESS_ROUTE"],
+            dimension: Literal["COMPANY_FIRST", "WEB_FIRST", "JOB_FIRST", "SOCIAL_FIRST"],
+            based_on_attempt_id: Identifier, expected_stage_version: Annotated[int, Field(ge=1)],
+            reason: Annotated[str, Field(min_length=20, max_length=480)]) -> CallToolResult:
+        """Record Panky's evidence-bound review that one successfully read source route produced no sufficient field signal. Requires an exact prior attempt and original page read; a technical failure or AI-only response cannot count as exhaustion. Does not close a candidate by itself."""
+        return await portal_request("POST", "/exploration/enrichment-route-reviews", body={
+            "commandId": command_id, "request": {"cycleId": cycle_id, "companyId": company_id,
+                "linkId": link_id, "fieldKey": field_key, "dimension": dimension,
+                "basedOnAttemptId": based_on_attempt_id, "expectedStageVersion": expected_stage_version,
+                "reason": reason}})
 
     @server.tool()
     async def acquisition_direct_exploration(command_id: Identifier, cycle_id: Identifier,

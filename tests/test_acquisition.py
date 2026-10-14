@@ -104,7 +104,9 @@ def test_bounds_prohibited_tools_and_scoped_principals(monkeypatch):
     configure(monkeypatch, unexpected)
     assert "acquisition_manage_company_profile" in acquisition.TOOLS
     assert "acquisition_direct_candidate_enrichment" in acquisition.TOOLS
+    assert "acquisition_review_candidate_enrichment_route" in acquisition.TOOLS
     assert _tool_authorization_error(Principal.management(), "acquisition_direct_candidate_enrichment") is None
+    assert _tool_authorization_error(Principal.management(), "acquisition_review_candidate_enrichment_route") is None
     assert _tool_authorization_error(Principal.management(), "acquisition_manage_company_profile") is None
     assert "acquisition_reconcile_company_identity" in acquisition.TOOLS
     assert _tool_authorization_error(Principal.management(), "acquisition_reconcile_company_identity") is None
@@ -112,6 +114,7 @@ def test_bounds_prohibited_tools_and_scoped_principals(monkeypatch):
     developer = replace(Principal.management(), type="developer")
     assert _tool_authorization_error(developer, "acquisition_manage_company_profile") == "tool_denied"
     assert _tool_authorization_error(developer, "acquisition_direct_candidate_enrichment") == "tool_denied"
+    assert _tool_authorization_error(developer, "acquisition_review_candidate_enrichment_route") == "tool_denied"
     assert _tool_authorization_error(developer, "acquisition_reconcile_company_identity") == "tool_denied"
     for name in ["acquisition_sql", "acquisition_patch", "acquisition_set_priority", "acquisition_send"]:
         assert _tool_authorization_error(Principal.management(), name) == "tool_denied"
@@ -148,6 +151,30 @@ def test_candidate_web_first_direction_preserves_context_and_rejects_source_uri(
     rejected = asyncio.run(mcp_server.call_tool("acquisition_direct_candidate_enrichment",
                                             args | {"source_uri": "https://example.com"}))
     assert rejected.is_error
+    assert len(calls) == 1
+
+
+def test_candidate_route_review_preserves_exact_attempt(monkeypatch):
+    calls = []
+    def handler(request):
+        calls.append(request)
+        assert request.method == "POST"
+        assert request.url.path.endswith("/exploration/enrichment-route-reviews")
+        return httpx.Response(202, json={"status": "RECORDED"})
+    configure(monkeypatch, handler)
+    args = dict(command_id="synthetic-review", cycle_id="cycle", company_id="company",
+                link_id="selected-link", field_key="FUNCTION_IN_LINK", dimension="WEB_FIRST",
+                based_on_attempt_id="attempt-one", expected_stage_version=2,
+                reason="Original source was read and did not resolve the field.")
+    result = unpack(asyncio.run(mcp_server.call_tool("acquisition_review_candidate_enrichment_route", args)))
+    assert result["httpStatus"] == 202
+    assert json.loads(calls[0].content) == {"commandId": "synthetic-review", "request": {
+        "cycleId": "cycle", "companyId": "company", "linkId": "selected-link",
+        "fieldKey": "FUNCTION_IN_LINK", "dimension": "WEB_FIRST",
+        "basedOnAttemptId": "attempt-one", "expectedStageVersion": 2,
+        "reason": args["reason"]}}
+    assert asyncio.run(mcp_server.call_tool("acquisition_review_candidate_enrichment_route",
+                                     args | {"based_on_attempt_id": ""})).is_error
     assert len(calls) == 1
 
 
