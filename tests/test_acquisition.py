@@ -163,6 +163,26 @@ def test_candidate_web_first_direction_preserves_context_and_rejects_source_uri(
     assert len(calls) == 2
 
 
+def test_early_screening_review_preserves_candidate_and_source_receipts(monkeypatch):
+    calls = []
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(202, json={"status": "recorded"})
+    configure(monkeypatch, handler)
+    hashes = ["a" * 64, "b" * 64]
+    args = dict(command_id="screen-fixture", cycle_id="cycle", company_id="candidate",
+                link_id="selected-link", based_on_attempt_id="complete-web-read",
+                expected_stage_version=2, source_receipt_hashes=hashes,
+                reason="Both original pages refer to other companies and supply no verified identity or access route.")
+    result = unpack(asyncio.run(mcp_server.call_tool("acquisition_review_candidate_early_screening", args)))
+    assert result["httpStatus"] == 202
+    assert calls[0].url.path.endswith("/exploration/early-screening-reviews")
+    assert json.loads(calls[0].content)["request"] == {
+        "cycleId": "cycle", "companyId": "candidate", "linkId": "selected-link",
+        "basedOnAttemptId": "complete-web-read", "expectedStageVersion": 2,
+        "sourceReceiptHashes": hashes, "reason": args["reason"]}
+
+
 def test_candidate_route_review_preserves_exact_attempt(monkeypatch):
     calls = []
     def handler(request):

@@ -36,6 +36,7 @@ TOOLS = frozenset({
     "acquisition_get_activation_preflight",
     "acquisition_get_discovery",
     "acquisition_get_exploration_map", "acquisition_direct_exploration", "acquisition_direct_candidate_enrichment",
+    "acquisition_review_candidate_early_screening",
     "acquisition_review_candidate_enrichment_route",
     "acquisition_record_candidate_link_observation",
     "acquisition_manage_company_profile",
@@ -163,6 +164,19 @@ def register_acquisition_tools(server: Any) -> None:
             request["screeningReviewReason"] = screening_review_reason
         return await portal_request("POST", "/exploration/enrichment-directions", body={
             "commandId": command_id, "request": request})
+
+    @server.tool()
+    async def acquisition_review_candidate_early_screening(
+            command_id: Identifier, cycle_id: Identifier, company_id: Identifier, link_id: Identifier,
+            based_on_attempt_id: Identifier, expected_stage_version: Annotated[int, Field(ge=1)],
+            source_receipt_hashes: Annotated[list[str], Field(min_length=1, max_length=12)],
+            reason: Annotated[str, Field(min_length=30, max_length=1000)]) -> CallToolResult:
+        """Review every original source from one complete Web First read as unattributed to this candidate. Requires the exact source receipt hashes, no sourced minimum, one active link and a written reason. This records Panky's review; the Engine worker separately applies an early CLOSED decision with its own actor and audit trail. A blocked or unread source cannot qualify."""
+        return await portal_request("POST", "/exploration/early-screening-reviews", body={
+            "commandId": command_id, "request": {"cycleId": cycle_id, "companyId": company_id,
+                "linkId": link_id, "basedOnAttemptId": based_on_attempt_id,
+                "expectedStageVersion": expected_stage_version,
+                "sourceReceiptHashes": source_receipt_hashes, "reason": reason}})
 
     @server.tool()
     async def acquisition_review_candidate_enrichment_route(
