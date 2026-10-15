@@ -166,7 +166,7 @@ def register_acquisition_tools(server: Any) -> None:
             based_on_attempt_id: Identifier, expected_stage_version: Annotated[int, Field(ge=1)],
             reason: Annotated[str, Field(min_length=20, max_length=480)],
             review_mode: Literal["SOURCE_READ", "NO_ATTRIBUTED_SOURCE"] = "SOURCE_READ") -> CallToolResult:
-        """Record Panky's evidence-bound review of one field and source dimension. SOURCE_READ requires an exact original-page attempt. NO_ATTRIBUTED_SOURCE requires two distinct successful AI source-discovery attempts without citations and no original read in that dimension. Technical failure cannot count as exhaustion. This does not close a candidate by itself."""
+        """Record Panky's evidence-bound review of one field and source dimension. SOURCE_READ requires an exact original-page attempt. NO_ATTRIBUTED_SOURCE requires two distinct successful AI source-discovery attempts with every cited original page read, including searches with zero citations. Panky must explain why no citation belongs to this candidate. An unread or blocked page and a technical failure cannot count as exhaustion. This does not close a candidate by itself."""
         return await portal_request("POST", "/exploration/enrichment-route-reviews", body={
             "commandId": command_id, "request": {"cycleId": cycle_id, "companyId": company_id,
                 "linkId": link_id, "fieldKey": field_key, "dimension": dimension,
