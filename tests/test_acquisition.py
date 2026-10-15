@@ -151,10 +151,16 @@ def test_candidate_web_first_direction_preserves_context_and_rejects_source_uri(
         "cycleId": "cycle", "companyId": "company", "linkId": "selected-link",
         "fieldKey": "FUNCTION_IN_LINK", "dimension": "WEB_FIRST",
         "question": args["question"], "expectedStageVersion": 1, "reason": args["reason"]}}
+    reviewed = args | {"command_id": "synthetic-c3-after-review",
+                       "screening_review_attempt_id": "prior-no-signal",
+                       "screening_review_reason": "The prior search found no usable company fact; this question tests a distinct source."}
+    assert unpack(asyncio.run(mcp_server.call_tool("acquisition_direct_candidate_enrichment", reviewed)))["httpStatus"] == 202
+    assert json.loads(calls[1].content)["request"]["screeningReviewAttemptId"] == "prior-no-signal"
+    assert json.loads(calls[1].content)["request"]["screeningReviewReason"] == reviewed["screening_review_reason"]
     rejected = asyncio.run(mcp_server.call_tool("acquisition_direct_candidate_enrichment",
                                             args | {"source_uri": "https://example.com"}))
     assert rejected.is_error
-    assert len(calls) == 1
+    assert len(calls) == 2
 
 
 def test_candidate_route_review_preserves_exact_attempt(monkeypatch):
