@@ -142,8 +142,10 @@ def register_acquisition_tools(server: Any) -> None:
             question: Annotated[str, Field(min_length=8, max_length=500)],
             expected_stage_version: Annotated[int, Field(ge=1)],
             reason: Annotated[str, Field(min_length=8, max_length=1000)],
-            source_uri: Annotated[str, Field(min_length=9, max_length=1000)] | None = None) -> CallToolResult:
-        """Queue one candidate-bound, non-contact enrichment question. Web First uses Brunova Chrome AI Mode to find sources, then reads original pages. Other dimensions require an existing attributed HTTPS source. Read the current company stage/version first; this tool does not confirm an AI answer as a company fact."""
+            source_uri: Annotated[str, Field(min_length=9, max_length=1000)] | None = None,
+            screening_review_attempt_id: Identifier | None = None,
+            screening_review_reason: Annotated[str, Field(min_length=20, max_length=480)] | None = None) -> CallToolResult:
+        """Queue one candidate-bound, non-contact enrichment question. Web First uses Brunova Chrome AI Mode to find sources, then reads original pages. Other dimensions require an existing attributed HTTPS source. After a no-signal attempt, further spending requires the latest attempt ID and an explicit screening review explaining why this question is worthwhile. This review does not exhaust sources or close the candidate. Read the current company stage/version first; this tool does not confirm an AI answer as a company fact."""
         if dimension == "WEB_FIRST" and source_uri is not None:
             raise ValueError("Web First takes no source URI")
         if dimension != "WEB_FIRST":
@@ -155,6 +157,10 @@ def register_acquisition_tools(server: Any) -> None:
                    "expectedStageVersion": expected_stage_version, "reason": reason}
         if source_uri is not None:
             request["sourceUri"] = source_uri
+        if screening_review_attempt_id is not None:
+            request["screeningReviewAttemptId"] = screening_review_attempt_id
+        if screening_review_reason is not None:
+            request["screeningReviewReason"] = screening_review_reason
         return await portal_request("POST", "/exploration/enrichment-directions", body={
             "commandId": command_id, "request": request})
 
