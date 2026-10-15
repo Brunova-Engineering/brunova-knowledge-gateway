@@ -37,6 +37,7 @@ TOOLS = frozenset({
     "acquisition_get_discovery",
     "acquisition_get_exploration_map", "acquisition_direct_exploration", "acquisition_direct_candidate_enrichment",
     "acquisition_review_candidate_enrichment_route",
+    "acquisition_record_candidate_link_observation",
     "acquisition_manage_company_profile",
     "acquisition_reconcile_company_identity",
     "acquisition_prepare_conversation", "acquisition_bind_candidate_message",
@@ -171,6 +172,28 @@ def register_acquisition_tools(server: Any) -> None:
                 "linkId": link_id, "fieldKey": field_key, "dimension": dimension,
                 "basedOnAttemptId": based_on_attempt_id, "expectedStageVersion": expected_stage_version,
                 "reason": reason, "reviewMode": review_mode}})
+
+    @server.tool()
+    async def acquisition_record_candidate_link_observation(
+            command_id: Identifier, cycle_id: Identifier, company_id: Identifier,
+            member_company_id: Identifier, link_id: Identifier, based_on_attempt_id: Identifier,
+            source_url: Annotated[str, Field(min_length=9, max_length=1000)],
+            excerpt: Annotated[str, Field(min_length=20, max_length=600)],
+            statement: Annotated[str, Field(min_length=20, max_length=600)],
+            reason: Annotated[str, Field(min_length=20, max_length=1000)],
+            expected_stage_version: Annotated[int, Field(ge=1)],
+            expected_map_version: Annotated[int, Field(ge=1)]) -> CallToolResult:
+        """Record one reviewed company-to-link observation from an exact original-page receipt. The canonical candidate and member lead must first be explicitly reconciled; the member must already appear in this link. The quote must occur in a successful read, and the Engine retains the former inferred claim. This never contacts the company or decides fit."""
+        parsed = urlsplit(source_url)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("an original HTTPS source is required")
+        return await portal_request("POST", "/exploration/candidate-link-observations", body={
+            "commandId": command_id, "request": {"cycleId": cycle_id, "companyId": company_id,
+                "memberCompanyId": member_company_id, "linkId": link_id,
+                "basedOnAttemptId": based_on_attempt_id, "sourceUrl": source_url,
+                "excerpt": excerpt, "statement": statement, "reason": reason,
+                "expectedStageVersion": expected_stage_version,
+                "expectedMapVersion": expected_map_version}})
 
     @server.tool()
     async def acquisition_direct_exploration(command_id: Identifier, cycle_id: Identifier,
