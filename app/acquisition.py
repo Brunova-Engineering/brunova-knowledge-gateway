@@ -38,6 +38,7 @@ TOOLS = frozenset({
     "acquisition_get_exploration_map", "acquisition_direct_exploration", "acquisition_direct_candidate_enrichment",
     "acquisition_review_candidate_early_screening",
     "acquisition_review_candidate_enrichment_route",
+    "acquisition_review_candidate_fit",
     "acquisition_record_candidate_link_observation",
     "acquisition_manage_company_profile",
     "acquisition_reconcile_company_identity",
@@ -177,6 +178,37 @@ def register_acquisition_tools(server: Any) -> None:
                 "linkId": link_id, "basedOnAttemptId": based_on_attempt_id,
                 "expectedStageVersion": expected_stage_version,
                 "sourceReceiptHashes": source_receipt_hashes, "reason": reason}})
+
+    @server.tool()
+    async def acquisition_review_candidate_fit(
+            command_id: Identifier, cycle_id: Identifier, company_id: Identifier, link_id: Identifier,
+            expected_stage_version: Annotated[int, Field(ge=1)],
+            decision: Literal["ADVANCE", "MORE_RESEARCH", "NO_FIT"],
+            process: Annotated[str, Field(min_length=12, max_length=600)],
+            brunova_capability: Annotated[str, Field(min_length=12, max_length=600)],
+            proposed_offer: Annotated[str, Field(min_length=12, max_length=1000)],
+            fit_hypothesis: Annotated[str, Field(min_length=20, max_length=1500)],
+            commercial_question: Annotated[str, Field(min_length=12, max_length=600)],
+            uncertainty: Annotated[str, Field(min_length=12, max_length=1000)],
+            counterevidence: Annotated[str, Field(min_length=8, max_length=1000)],
+            company_source_url: Annotated[str, Field(min_length=9, max_length=1000)],
+            brunova_source_url: Annotated[str, Field(min_length=18, max_length=1000)],
+            reason: Annotated[str, Field(min_length=20, max_length=1000)]) -> CallToolResult:
+        """Record a versioned, link-specific commercial fit review for a candidate already in BRUNOVA_FIT. ADVANCE is applied later by the Engine worker; this tool never creates an Account, proposal, or contact. The company source must already support the dossier, and the Brunova source must be official. Distinguish facts, hypothesis, uncertainty, and contrary evidence."""
+        company_url = urlsplit(company_source_url)
+        brunova_url = urlsplit(brunova_source_url)
+        if (company_url.scheme != "https" or not company_url.hostname or company_url.username or company_url.password
+                or brunova_url.scheme != "https" or brunova_url.hostname != "brunova.mx"
+                or brunova_url.username or brunova_url.password):
+            raise ValueError("attributed HTTPS company and official Brunova sources required")
+        return await portal_request("POST", "/exploration/fit-reviews", body={
+            "commandId": command_id, "request": {"cycleId": cycle_id, "companyId": company_id,
+                "linkId": link_id, "expectedStageVersion": expected_stage_version,
+                "decision": decision, "process": process, "brunovaCapability": brunova_capability,
+                "proposedOffer": proposed_offer, "fitHypothesis": fit_hypothesis,
+                "commercialQuestion": commercial_question, "uncertainty": uncertainty,
+                "counterevidence": counterevidence, "companySourceUrl": company_source_url,
+                "brunovaSourceUrl": brunova_source_url, "reason": reason}})
 
     @server.tool()
     async def acquisition_review_candidate_enrichment_route(
