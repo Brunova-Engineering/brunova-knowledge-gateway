@@ -183,6 +183,34 @@ def test_early_screening_review_preserves_candidate_and_source_receipts(monkeypa
         "sourceReceiptHashes": hashes, "reason": args["reason"]}
 
 
+def test_fit_review_keeps_selected_link_and_official_sources(monkeypatch):
+    calls = []
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(202, json={"status": "recorded", "externalEffect": False})
+    configure(monkeypatch, handler)
+    args = dict(command_id="fit-fixture", cycle_id="cycle", company_id="candidate",
+                link_id="selected-link", expected_stage_version=3, decision="ADVANCE",
+                process="Verified freezing process", brunova_capability="Operational intelligence systems",
+                proposed_offer="Explore monitoring of the freezing process",
+                fit_hypothesis="A monitoring layer could improve visibility of the observed process.",
+                commercial_question="How do you monitor the process today?",
+                uncertainty="The company's internal priorities are unknown.",
+                counterevidence="No public contradiction was found in reviewed sources.",
+                company_source_url="https://company.example/process",
+                brunova_source_url="https://brunova.mx/",
+                reason="The cited process and published Brunova capability support an exploratory question.")
+    result = unpack(asyncio.run(mcp_server.call_tool("acquisition_review_candidate_fit", args)))
+    assert result["httpStatus"] == 202
+    assert calls[0].url.path.endswith("/exploration/fit-reviews")
+    payload = json.loads(calls[0].content)["request"]
+    assert payload["companyId"] == "candidate" and payload["linkId"] == "selected-link"
+    assert payload["companySourceUrl"] == args["company_source_url"]
+    invalid = asyncio.run(mcp_server.call_tool("acquisition_review_candidate_fit",
+                                               args | {"brunova_source_url": "https://elsewhere.example/"}))
+    assert invalid.is_error and len(calls) == 1
+
+
 def test_candidate_route_review_preserves_exact_attempt(monkeypatch):
     calls = []
     def handler(request):
