@@ -39,6 +39,7 @@ TOOLS = frozenset({
     "acquisition_review_candidate_early_screening",
     "acquisition_review_candidate_enrichment_route",
     "acquisition_review_candidate_fit",
+    "acquisition_revise_candidate_fit_copy",
     "acquisition_record_candidate_link_observation",
     "acquisition_manage_company_profile",
     "acquisition_reconcile_company_identity",
@@ -209,6 +210,20 @@ def register_acquisition_tools(server: Any) -> None:
                 "commercialQuestion": commercial_question, "uncertainty": uncertainty,
                 "counterevidence": counterevidence, "companySourceUrl": company_source_url,
                 "brunovaSourceUrl": brunova_source_url, "reason": reason}})
+
+    @server.tool()
+    async def acquisition_revise_candidate_fit_copy(
+            command_id: Identifier, company_id: Identifier, link_id: Identifier,
+            review_id: Identifier, expected_stage_version: Annotated[int, Field(ge=1)],
+            proposed_offer: Annotated[str, Field(min_length=40, max_length=1000)],
+            fit_hypothesis: Annotated[str, Field(min_length=40, max_length=1500)],
+            reason: Annotated[str, Field(min_length=30, max_length=1000)]) -> CallToolResult:
+        """Correct the wording of an existing ADVANCE fit review after the Engine moved the exact candidate and link to FILTERING. This records an auditable copy revision without changing stage, evidence, original review, Account, proposal or contact. Explain the company-specific signal, Brunova's relevant contribution and the uncertainty; do not assert an unobserved problem as fact."""
+        return await portal_request("POST", "/exploration/fit-copy-revisions", body={
+            "commandId": command_id, "request": {"companyId": company_id, "linkId": link_id,
+                "reviewId": review_id, "expectedStageVersion": expected_stage_version,
+                "proposedOffer": proposed_offer, "fitHypothesis": fit_hypothesis,
+                "reason": reason}})
 
     @server.tool()
     async def acquisition_review_candidate_enrichment_route(
