@@ -538,6 +538,7 @@ def test_mcp_exposes_only_governed_tools(monkeypatch):
             "acquisition_record_candidate_attention",
             "acquisition_record_candidate_contact_method",
             "acquisition_request_candidate_attention_research",
+            "acquisition_complete_candidate_attention_research",
             "acquisition_record_candidate_filtering_decision",
         "acquisition_record_candidate_link_observation",
         "acquisition_manage_company_profile", "acquisition_reconcile_company_identity",

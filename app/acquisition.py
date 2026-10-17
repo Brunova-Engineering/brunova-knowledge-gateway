@@ -43,6 +43,7 @@ TOOLS = frozenset({
     "acquisition_record_candidate_attention",
     "acquisition_record_candidate_contact_method",
     "acquisition_request_candidate_attention_research",
+    "acquisition_complete_candidate_attention_research",
     "acquisition_record_candidate_filtering_decision",
     "acquisition_record_candidate_link_observation",
     "acquisition_manage_company_profile",
@@ -268,7 +269,7 @@ def register_acquisition_tools(server: Any) -> None:
             command_id: Identifier, cycle_id: Identifier, company_id: Identifier,
             expected_stage_version: Annotated[int, Field(ge=1)],
             channel_type: Literal["EMAIL", "FACEBOOK", "INSTAGRAM", "WHATSAPP"],
-            channel_value: Annotated[str, Field(min_length=3, max_length=500)],
+            channel_value: Annotated[str, Field(min_length=5, max_length=500)],
             source_url: Annotated[str, Field(min_length=9, max_length=1000)],
             attribution: Annotated[str, Field(min_length=20, max_length=1000)]) -> CallToolResult:
         """Record one attributed, source-backed contact method for a FILTERING candidate. No message is sent and no contact effect is authorized. A later attention resolution must cite the returned method ID."""
@@ -293,6 +294,27 @@ def register_acquisition_tools(server: Any) -> None:
             "commandId": command_id, "request": {"cycleId": cycle_id, "companyId": company_id,
                 "linkId": link_id, "expectedStageVersion": expected_stage_version,
                 "reasonCode": reason_code, "question": question, "maxMinutes": max_minutes}})
+
+    @server.tool()
+    async def acquisition_complete_candidate_attention_research(
+            command_id: Identifier, cycle_id: Identifier, request_id: Identifier,
+            company_id: Identifier, link_id: Identifier,
+            expected_stage_version: Annotated[int, Field(ge=1)],
+            outcome: Literal["FOUND_EVIDENCE", "NO_VERIFIED_SIGNAL", "BLOCKED"],
+            summary: Annotated[str, Field(min_length=20, max_length=1000)],
+            source_refs: Annotated[list[str], Field(max_length=8)]) -> CallToolResult:
+        """Complete one dispatched C.5 attention investigation with the exact candidate, link, stage and original HTTPS sources. This records a research receipt only; it does not resolve attention, select a candidate or contact a company."""
+        for source in source_refs:
+            parsed = urlsplit(source)
+            if len(source) > 1000 or not source.startswith("https://") or not parsed.hostname or parsed.username or parsed.password:
+                raise ValueError("attributed HTTPS source required")
+        if outcome == "FOUND_EVIDENCE" and not source_refs:
+            raise ValueError("found evidence requires original sources")
+        return await portal_request("POST", "/exploration/attention/research-receipts", body={
+            "commandId": command_id, "request": {"cycleId": cycle_id, "requestId": request_id,
+                "companyId": company_id, "linkId": link_id,
+                "expectedStageVersion": expected_stage_version, "outcome": outcome,
+                "summary": summary, "sourceRefs": source_refs}})
 
     @server.tool()
     async def acquisition_record_candidate_filtering_decision(

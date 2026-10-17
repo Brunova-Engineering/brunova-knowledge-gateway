@@ -266,9 +266,16 @@ def test_candidate_attention_contact_and_filtering_keep_exact_governed_context(m
                     question="Which official public channel belongs to this company?", max_minutes=15)
     assert unpack(asyncio.run(mcp_server.call_tool("acquisition_request_candidate_attention_research", research)))["httpStatus"] == 202
     assert calls[3].url.path.endswith("/exploration/attention/research-requests")
+    receipt = dict(command_id="research-receipt-one", cycle_id="cycle", request_id="research-one",
+                   company_id="candidate", link_id="selected-link", expected_stage_version=4,
+                   outcome="FOUND_EVIDENCE", summary="The official company page lists a verified email address.",
+                   source_refs=["https://example.test/contact"])
+    assert unpack(asyncio.run(mcp_server.call_tool("acquisition_complete_candidate_attention_research", receipt)))["httpStatus"] == 202
+    assert calls[4].url.path.endswith("/exploration/attention/research-receipts")
+    assert json.loads(calls[4].content)["request"]["requestId"] == "research-one"
     bad = asyncio.run(mcp_server.call_tool("acquisition_record_candidate_filtering_decision",
                                            decision | {"source_url": "http://example.test/process"}))
-    assert bad.is_error and len(calls) == 4
+    assert bad.is_error and len(calls) == 5
 
 
 def test_candidate_route_review_preserves_exact_attempt(monkeypatch):
