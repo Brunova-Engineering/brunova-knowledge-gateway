@@ -40,6 +40,10 @@ TOOLS = frozenset({
     "acquisition_review_candidate_enrichment_route",
     "acquisition_review_candidate_fit",
     "acquisition_revise_candidate_fit_copy",
+    "acquisition_record_candidate_attention",
+    "acquisition_record_candidate_contact_method",
+    "acquisition_request_candidate_attention_research",
+    "acquisition_record_candidate_filtering_decision",
     "acquisition_record_candidate_link_observation",
     "acquisition_manage_company_profile",
     "acquisition_reconcile_company_identity",
@@ -224,6 +228,100 @@ def register_acquisition_tools(server: Any) -> None:
                 "reviewId": review_id, "expectedStageVersion": expected_stage_version,
                 "proposedOffer": proposed_offer, "fitHypothesis": fit_hypothesis,
                 "reason": reason}})
+
+    @server.tool()
+    async def acquisition_record_candidate_attention(
+            command_id: Identifier, cycle_id: Identifier, company_id: Identifier, link_id: Identifier,
+            expected_stage_version: Annotated[int, Field(ge=1)],
+            action: Literal["OPEN", "RESOLVE"],
+            reason_code: Literal["NO_VERIFIED_CONTACT", "IDENTITY_CONFLICT", "PRIOR_RELATIONSHIP_CONFLICT", "FIT_EVIDENCE_CONFLICT"],
+            summary: Annotated[str, Field(min_length=20, max_length=1000)],
+            evidence_refs: Annotated[list[Annotated[str, Field(min_length=8, max_length=500)]], Field(min_length=1, max_length=12)],
+            checked_channels: list[Literal["EMAIL", "FACEBOOK", "INSTAGRAM", "WHATSAPP"]] | None = None,
+            resolution: Annotated[str, Field(min_length=20, max_length=1000)] | None = None,
+            resolution_action: Literal["REGISTER_CONTACT", "CONFIRM_IDENTITY", "KEEP_IDENTITIES_SEPARATE", "LINK_PRIOR_RECORD", "KEEP_SEPARATE", "CORRECT_FIT_THESIS", "CLOSE_NO_FIT"] | None = None,
+            contact_method_id: Identifier | None = None,
+            related_record_ref: Annotated[str, Field(min_length=5, max_length=200)] | None = None,
+            supporting_action_id: Identifier | None = None) -> CallToolResult:
+        """Record a versioned C.5 attention reason or evidence-bound resolution for one FILTERING candidate and link. Opening does not change commercial stage or authorize contact. RESOLVE requires a concrete resolution and evidence; an unread source or mere dismissal is not enough."""
+        request: dict[str, Any] = {"cycleId": cycle_id, "companyId": company_id, "linkId": link_id,
+                                   "expectedStageVersion": expected_stage_version, "action": action,
+                                   "reasonCode": reason_code, "summary": summary,
+                                   "evidenceRefs": evidence_refs}
+        if checked_channels is not None:
+            request["checkedChannels"] = checked_channels
+        if resolution is not None:
+            request["resolution"] = resolution
+        if resolution_action is not None:
+            request["resolutionAction"] = resolution_action
+        if contact_method_id is not None:
+            request["contactMethodId"] = contact_method_id
+        if related_record_ref is not None:
+            request["relatedRecordRef"] = related_record_ref
+        if supporting_action_id is not None:
+            request["supportingActionId"] = supporting_action_id
+        return await portal_request("POST", "/exploration/attention/commands", body={
+            "commandId": command_id, "request": request})
+
+    @server.tool()
+    async def acquisition_record_candidate_contact_method(
+            command_id: Identifier, cycle_id: Identifier, company_id: Identifier,
+            expected_stage_version: Annotated[int, Field(ge=1)],
+            channel_type: Literal["EMAIL", "FACEBOOK", "INSTAGRAM", "WHATSAPP"],
+            channel_value: Annotated[str, Field(min_length=3, max_length=500)],
+            source_url: Annotated[str, Field(min_length=9, max_length=1000)],
+            attribution: Annotated[str, Field(min_length=20, max_length=1000)]) -> CallToolResult:
+        """Record one attributed, source-backed contact method for a FILTERING candidate. No message is sent and no contact effect is authorized. A later attention resolution must cite the returned method ID."""
+        parsed = urlsplit(source_url)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("attributed HTTPS source required")
+        return await portal_request("POST", "/exploration/contact-methods", body={
+            "commandId": command_id, "request": {"cycleId": cycle_id, "companyId": company_id,
+                "expectedStageVersion": expected_stage_version, "channelType": channel_type,
+                "channelValue": channel_value, "sourceUrl": source_url,
+                "attribution": attribution}})
+
+    @server.tool()
+    async def acquisition_request_candidate_attention_research(
+            command_id: Identifier, cycle_id: Identifier, company_id: Identifier, link_id: Identifier,
+            expected_stage_version: Annotated[int, Field(ge=1)],
+            reason_code: Literal["NO_VERIFIED_CONTACT", "IDENTITY_CONFLICT", "PRIOR_RELATIONSHIP_CONFLICT", "FIT_EVIDENCE_CONFLICT"],
+            question: Annotated[str, Field(min_length=12, max_length=500)],
+            max_minutes: Annotated[int, Field(ge=1, le=30)]) -> CallToolResult:
+        """Queue one bounded, non-contact investigation for an open C.5 attention reason. Queueing is not completion: Panky must review the request and return a separate sourced result."""
+        return await portal_request("POST", "/exploration/attention/research-requests", body={
+            "commandId": command_id, "request": {"cycleId": cycle_id, "companyId": company_id,
+                "linkId": link_id, "expectedStageVersion": expected_stage_version,
+                "reasonCode": reason_code, "question": question, "maxMinutes": max_minutes}})
+
+    @server.tool()
+    async def acquisition_record_candidate_filtering_decision(
+            command_id: Identifier, cycle_id: Identifier, company_id: Identifier, link_id: Identifier,
+            expected_stage_version: Annotated[int, Field(ge=1)],
+            decision: Literal["SELECT", "CONTINUE", "CLOSE"],
+            reason: Annotated[str, Field(min_length=20, max_length=1000)],
+            source_url: Annotated[str, Field(min_length=9, max_length=1000)],
+            question: Annotated[str, Field(min_length=12, max_length=500)] | None = None,
+            review_at: Annotated[str, Field(min_length=10, max_length=40)] | None = None,
+            scope: Literal["LINK", "CHAIN", "COMPANY"] | None = None,
+            branch_id: Identifier | None = None) -> CallToolResult:
+        """Record Panky's sourced C.5 selection, bounded continuation or commercial closure for one candidate and link. The Engine applies eligible transitions later; this command alone does not create an Account, send a proposal or contact anyone."""
+        parsed = urlsplit(source_url)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("attributed HTTPS source required")
+        request: dict[str, Any] = {"cycleId": cycle_id, "companyId": company_id, "linkId": link_id,
+                                   "expectedStageVersion": expected_stage_version, "decision": decision,
+                                   "reason": reason, "sourceUrl": source_url}
+        if question is not None:
+            request["question"] = question
+        if review_at is not None:
+            request["reviewAt"] = review_at
+        if scope is not None:
+            request["scope"] = scope
+        if branch_id is not None:
+            request["branchId"] = branch_id
+        return await portal_request("POST", "/exploration/filtering/decisions", body={
+            "commandId": command_id, "request": request})
 
     @server.tool()
     async def acquisition_review_candidate_enrichment_route(

@@ -230,6 +230,47 @@ def test_fit_copy_revision_preserves_review_and_stage_context(monkeypatch):
     assert payload["proposedOffer"] == args["proposed_offer"]
 
 
+def test_candidate_attention_contact_and_filtering_keep_exact_governed_context(monkeypatch):
+    calls = []
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(202, json={"status": "recorded", "externalEffect": False})
+    configure(monkeypatch, handler)
+    method = dict(command_id="contact-one", cycle_id="cycle", company_id="candidate",
+                  expected_stage_version=4, channel_type="EMAIL", channel_value="info@example.test",
+                  source_url="https://example.test/contact",
+                  attribution="The company's own contact page names this address.")
+    assert unpack(asyncio.run(mcp_server.call_tool("acquisition_record_candidate_contact_method", method)))["httpStatus"] == 202
+    assert calls[0].url.path.endswith("/exploration/contact-methods")
+    assert json.loads(calls[0].content)["request"]["companyId"] == "candidate"
+    attention = dict(command_id="attention-one", cycle_id="cycle", company_id="candidate",
+                     link_id="selected-link", expected_stage_version=4, action="RESOLVE",
+                     reason_code="NO_VERIFIED_CONTACT", summary="A verified contact method was found.",
+                     evidence_refs=["https://example.test/contact"],
+                     resolution="The official contact page attributes this address to the candidate.",
+                     resolution_action="REGISTER_CONTACT",
+                     contact_method_id="contact-one")
+    assert unpack(asyncio.run(mcp_server.call_tool("acquisition_record_candidate_attention", attention)))["httpStatus"] == 202
+    assert calls[1].url.path.endswith("/exploration/attention/commands")
+    assert json.loads(calls[1].content)["request"]["contactMethodId"] == "contact-one"
+    decision = dict(command_id="select-one", cycle_id="cycle", company_id="candidate",
+                    link_id="selected-link", expected_stage_version=4, decision="SELECT",
+                    reason="The observed process and attributed thesis warrant a conversation.",
+                    source_url="https://example.test/process")
+    assert unpack(asyncio.run(mcp_server.call_tool("acquisition_record_candidate_filtering_decision", decision)))["httpStatus"] == 202
+    assert calls[2].url.path.endswith("/exploration/filtering/decisions")
+    assert json.loads(calls[2].content)["request"]["linkId"] == "selected-link"
+    research = dict(command_id="research-one", cycle_id="cycle", company_id="candidate",
+                    link_id="selected-link", expected_stage_version=4,
+                    reason_code="NO_VERIFIED_CONTACT",
+                    question="Which official public channel belongs to this company?", max_minutes=15)
+    assert unpack(asyncio.run(mcp_server.call_tool("acquisition_request_candidate_attention_research", research)))["httpStatus"] == 202
+    assert calls[3].url.path.endswith("/exploration/attention/research-requests")
+    bad = asyncio.run(mcp_server.call_tool("acquisition_record_candidate_filtering_decision",
+                                           decision | {"source_url": "http://example.test/process"}))
+    assert bad.is_error and len(calls) == 4
+
+
 def test_candidate_route_review_preserves_exact_attempt(monkeypatch):
     calls = []
     def handler(request):
