@@ -211,6 +211,25 @@ def test_fit_review_keeps_selected_link_and_official_sources(monkeypatch):
     assert invalid.is_error and len(calls) == 1
 
 
+def test_fit_copy_revision_preserves_review_and_stage_context(monkeypatch):
+    calls = []
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(202, json={"status": "recorded", "externalEffect": False})
+    configure(monkeypatch, handler)
+    args = dict(command_id="copy-revision", company_id="candidate", link_id="selected-link",
+                review_id="original-review", expected_stage_version=4,
+                proposed_offer="Si el relevo de congelación requiere estados compartidos, Brunova puede definir el registro y sus responsables.",
+                fit_hypothesis="La empresa declara congelación rápida; la necesidad de mejorar el relevo sigue por validar.",
+                reason="El texto anterior era una oferta genérica y no explicaba el valor para esta empresa.")
+    result = unpack(asyncio.run(mcp_server.call_tool("acquisition_revise_candidate_fit_copy", args)))
+    assert result["httpStatus"] == 202
+    assert calls[0].url.path.endswith("/exploration/fit-copy-revisions")
+    payload = json.loads(calls[0].content)["request"]
+    assert payload["reviewId"] == "original-review" and payload["expectedStageVersion"] == 4
+    assert payload["proposedOffer"] == args["proposed_offer"]
+
+
 def test_candidate_route_review_preserves_exact_attempt(monkeypatch):
     calls = []
     def handler(request):
