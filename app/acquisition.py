@@ -322,6 +322,12 @@ def register_acquisition_tools(server: Any) -> None:
         except (Exception):
             # Provider failures are pending, never evidence that a number is absent.
             pass
+        emit_audit_record(request_id=correlation_id(command_id), action="openwa_tool_call",
+                          resource_id=None, resource_type="openwa_mcp_tool",
+                          result="error" if outcome == "UNAVAILABLE" else "success",
+                          http_status=502 if outcome == "UNAVAILABLE" else 200,
+                          provider="openwa", tool="ContactCheckNumber",
+                          operation_classification="read")
         return await portal_request("POST", "/exploration/whatsapp-checks", body={
             "commandId": command_id, "request": {"cycleId": cycle_id, "companyId": company_id,
                 "expectedStageVersion": expected_stage_version, "normalizedNumber": normalized_number,
