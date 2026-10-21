@@ -753,3 +753,19 @@ def test_all_management_tools_forward_only_narrow_contract(monkeypatch):
         assert result['httpStatus'] == 409 and result['data']['code'] == 'STALE_ATTENTION_VERSION'
         assert 'private' not in str(result)
         monkeypatch.undo()
+
+
+def test_linkedin_contact_with_named_recipient_is_passed_as_structured_data(monkeypatch):
+    calls = []
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(202, json={"status": "recorded", "externalEffect": False})
+    configure(monkeypatch, handler)
+    method = dict(command_id="contact-linkedin", cycle_id="cycle", company_id="candidate",
+                  expected_stage_version=4, channel_type="LINKEDIN",
+                  channel_value="https://www.linkedin.com/company/example/",
+                  source_url="https://example.test/contact", contact_name="María López",
+                  attribution="The company's own contact page names this LinkedIn profile.")
+    assert unpack(asyncio.run(mcp_server.call_tool("acquisition_record_candidate_contact_method", method)))["httpStatus"] == 202
+    payload = json.loads(calls[0].content)["request"]
+    assert payload["channelType"] == "LINKEDIN" and payload["contactName"] == "María López"
