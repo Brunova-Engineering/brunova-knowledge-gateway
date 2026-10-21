@@ -19,6 +19,62 @@ def configure(monkeypatch, handler):
     monkeypatch.setattr(acquisition.httpx, "AsyncClient", lambda **kwargs: client(transport=httpx.MockTransport(handler), **kwargs))
 
 
+def test_whatsapp_check_uses_read_only_lookup_once_and_records_exact_result(monkeypatch):
+    calls = []
+    class Client:
+        async def call_tool(self, name, arguments):
+            calls.append((name, arguments))
+            return {"content": [{"type": "text", "text": json.dumps({"number": "529981931450", "exists": False})}], "isError": False}
+    from app.adapters.openwa import runtime
+    monkeypatch.setattr(runtime, "get_openwa_client", lambda: Client())
+    def handler(request):
+        if request.method == "GET":
+            return httpx.Response(200, json={"check": None})
+        body = json.loads(request.content)
+        assert body["request"]["outcome"] == "NOT_FOUND"
+        return httpx.Response(202, json={"status": "recorded", "outcome": "NOT_FOUND"})
+    configure(monkeypatch, handler)
+    args = {"command_id": "check-1", "cycle_id": "cycle-1", "company_id": "company-1",
+            "expected_stage_version": 3, "normalized_number": "529981931450",
+            "source_url": "https://example.test/notice", "session_id": "ready-session"}
+    result = unpack(asyncio.run(mcp_server.call_tool("acquisition_check_candidate_whatsapp", args)))
+    assert result["data"]["outcome"] == "NOT_FOUND"
+    assert calls == [("ContactCheckNumber", {"sessionId": "ready-session", "number": "529981931450"})]
+
+
+def test_whatsapp_existing_receipt_prevents_second_lookup(monkeypatch):
+    class Client:
+        async def call_tool(self, *_args):
+            raise AssertionError("duplicate lookup")
+    from app.adapters.openwa import runtime
+    monkeypatch.setattr(runtime, "get_openwa_client", lambda: Client())
+    configure(monkeypatch, lambda request: httpx.Response(200, json={"check": {"outcome": "NOT_FOUND"}}))
+    result = unpack(asyncio.run(mcp_server.call_tool("acquisition_check_candidate_whatsapp", {
+        "command_id": "check-2", "cycle_id": "cycle-1", "company_id": "company-1",
+        "expected_stage_version": 3, "normalized_number": "529981931450",
+        "source_url": "https://example.test/notice", "session_id": "ready-session"})))
+    assert result["data"]["status"] == "already_checked"
+
+
+def test_whatsapp_provider_failure_is_pending_not_a_negative_result(monkeypatch):
+    class Client:
+        async def call_tool(self, *_args):
+            raise RuntimeError("provider unavailable")
+    from app.adapters.openwa import runtime
+    monkeypatch.setattr(runtime, "get_openwa_client", lambda: Client())
+    def handler(request):
+        if request.method == "GET":
+            return httpx.Response(200, json={"check": None})
+        assert json.loads(request.content)["request"]["outcome"] == "UNAVAILABLE"
+        return httpx.Response(202, json={"status": "recorded", "outcome": "UNAVAILABLE"})
+    configure(monkeypatch, handler)
+    result = unpack(asyncio.run(mcp_server.call_tool("acquisition_check_candidate_whatsapp", {
+        "command_id": "check-3", "cycle_id": "cycle-1", "company_id": "company-1",
+        "expected_stage_version": 3, "normalized_number": "529981931450",
+        "source_url": "https://example.test/notice", "session_id": "ready-session"})))
+    assert result["data"]["outcome"] == "UNAVAILABLE"
+
+
 def test_exact_truth_auth_and_no_interpretation(monkeypatch):
     truth = {"schemaVersion": "1", "items": [{"epistemicState": tag} for tag in
              ["OBSERVED_FACT", "SUPPORTED_INFERENCE", "WORKING_HYPOTHESIS", "UNKNOWN", "CONFLICT_OR_STALE"]]}
