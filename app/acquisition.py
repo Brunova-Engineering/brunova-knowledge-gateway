@@ -238,7 +238,7 @@ def register_acquisition_tools(server: Any) -> None:
             reason_code: Literal["NO_VERIFIED_CONTACT", "IDENTITY_CONFLICT", "PRIOR_RELATIONSHIP_CONFLICT", "FIT_EVIDENCE_CONFLICT"],
             summary: Annotated[str, Field(min_length=20, max_length=1000)],
             evidence_refs: Annotated[list[Annotated[str, Field(min_length=8, max_length=500)]], Field(min_length=1, max_length=12)],
-            checked_channels: list[Literal["EMAIL", "FACEBOOK", "INSTAGRAM", "WHATSAPP"]] | None = None,
+            checked_channels: list[Literal["EMAIL", "FACEBOOK", "INSTAGRAM", "WHATSAPP", "LINKEDIN"]] | None = None,
             resolution: Annotated[str, Field(min_length=20, max_length=1000)] | None = None,
             resolution_action: Literal["REGISTER_CONTACT", "CONFIRM_IDENTITY", "KEEP_IDENTITIES_SEPARATE", "LINK_PRIOR_RECORD", "KEEP_SEPARATE", "CORRECT_FIT_THESIS", "CLOSE_NO_FIT"] | None = None,
             contact_method_id: Identifier | None = None,
@@ -268,11 +268,12 @@ def register_acquisition_tools(server: Any) -> None:
     async def acquisition_record_candidate_contact_method(
             command_id: Identifier, cycle_id: Identifier, company_id: Identifier,
             expected_stage_version: Annotated[int, Field(ge=1)],
-            channel_type: Literal["EMAIL", "FACEBOOK", "INSTAGRAM", "WHATSAPP"],
+            channel_type: Literal["EMAIL", "FACEBOOK", "INSTAGRAM", "WHATSAPP", "LINKEDIN"],
             channel_value: Annotated[str, Field(min_length=5, max_length=500)],
             source_url: Annotated[str, Field(min_length=9, max_length=1000)],
-            attribution: Annotated[str, Field(min_length=20, max_length=1000)]) -> CallToolResult:
-        """Record one attributed, source-backed contact method for a FILTERING candidate. No message is sent and no contact effect is authorized. A later attention resolution must cite the returned method ID."""
+            attribution: Annotated[str, Field(min_length=20, max_length=1000)],
+            contact_name: Annotated[str | None, Field(min_length=2, max_length=200)] = None) -> CallToolResult:
+        """Record one attributed, source-backed contact method for a FILTERING or SELECTED candidate. No message is sent and no contact effect is authorized. A later attention resolution must cite the returned method ID."""
         parsed = urlsplit(source_url)
         if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
             raise ValueError("attributed HTTPS source required")
@@ -280,7 +281,7 @@ def register_acquisition_tools(server: Any) -> None:
             "commandId": command_id, "request": {"cycleId": cycle_id, "companyId": company_id,
                 "expectedStageVersion": expected_stage_version, "channelType": channel_type,
                 "channelValue": channel_value, "sourceUrl": source_url,
-                "attribution": attribution}})
+                "attribution": attribution, **({"contactName": contact_name} if contact_name else {})}})
 
     @server.tool()
     async def acquisition_request_candidate_attention_research(
