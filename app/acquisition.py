@@ -42,6 +42,8 @@ TOOLS = frozenset({
     "acquisition_revise_candidate_fit_copy",
     "acquisition_record_candidate_attention",
     "acquisition_record_candidate_contact_method",
+    "acquisition_record_candidate_whatsapp_check",
+    "acquisition_check_candidate_whatsapp",
     "acquisition_request_candidate_attention_research",
     "acquisition_complete_candidate_attention_research",
     "acquisition_record_candidate_filtering_decision",
@@ -282,6 +284,64 @@ def register_acquisition_tools(server: Any) -> None:
                 "expectedStageVersion": expected_stage_version, "channelType": channel_type,
                 "channelValue": channel_value, "sourceUrl": source_url,
                 "attribution": attribution, **({"contactName": contact_name} if contact_name else {})}})
+
+    @server.tool()
+    async def acquisition_check_candidate_whatsapp(
+            command_id: Identifier, cycle_id: Identifier, company_id: Identifier,
+            expected_stage_version: Annotated[int, Field(ge=1)],
+            normalized_number: Annotated[str, Field(pattern=r"^[0-9]{8,15}$")],
+            source_url: Annotated[str, Field(min_length=9, max_length=1000)],
+            session_id: Identifier) -> CallToolResult:
+        """Check a sourced public number once without messaging it; save the exact lookup outcome. An existing receipt prevents a second lookup."""
+        parsed = urlsplit(source_url)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("attributed HTTPS source required")
+        prior = await portal_request("GET", "/exploration/whatsapp-checks", params={
+            "cycleId": cycle_id, "companyId": company_id, "normalizedNumber": normalized_number})
+        if prior.is_error:
+            return prior
+        prior_data = json.loads(prior.content[0].text)["data"]
+        if prior_data.get("check"):
+            return CallToolResult(content=[TextContent(type="text", text=json.dumps({
+                "httpStatus": 200, "data": {"status": "already_checked", "check": prior_data["check"]}}))])
+        from app.adapters.openwa.runtime import get_openwa_client
+        outcome = "UNAVAILABLE"
+        try:
+            raw = await get_openwa_client().call_tool("ContactCheckNumber", {
+                "sessionId": session_id, "number": normalized_number})
+            if isinstance(raw, dict) and not raw.get("isError"):
+                data = raw.get("structuredContent")
+                if not isinstance(data, dict):
+                    content = raw.get("content", [])
+                    data = json.loads(content[0]["text"]) if content and content[0].get("type") == "text" else None
+                if isinstance(data, dict):
+                    if data.get("number") == normalized_number and data.get("exists") is True:
+                        outcome = "EXISTS"
+                    elif data.get("number") == normalized_number and data.get("exists") is False:
+                        outcome = "NOT_FOUND"
+        except (Exception):
+            # Provider failures are pending, never evidence that a number is absent.
+            pass
+        return await portal_request("POST", "/exploration/whatsapp-checks", body={
+            "commandId": command_id, "request": {"cycleId": cycle_id, "companyId": company_id,
+                "expectedStageVersion": expected_stage_version, "normalizedNumber": normalized_number,
+                "sourceUrl": source_url, "outcome": outcome}})
+
+    @server.tool()
+    async def acquisition_record_candidate_whatsapp_check(
+            command_id: Identifier, cycle_id: Identifier, company_id: Identifier,
+            expected_stage_version: Annotated[int, Field(ge=1)],
+            normalized_number: Annotated[str, Field(pattern=r"^[0-9]{8,15}$")],
+            source_url: Annotated[str, Field(min_length=9, max_length=1000)],
+            outcome: Literal["EXISTS", "NOT_FOUND", "UNAVAILABLE"]) -> CallToolResult:
+        """Record one bounded WhatsApp lookup result for a source-backed candidate phone. This records no message and prevents another automatic lookup of the same candidate number."""
+        parsed = urlsplit(source_url)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("attributed HTTPS source required")
+        return await portal_request("POST", "/exploration/whatsapp-checks", body={
+            "commandId": command_id, "request": {"cycleId": cycle_id, "companyId": company_id,
+                "expectedStageVersion": expected_stage_version, "normalizedNumber": normalized_number,
+                "sourceUrl": source_url, "outcome": outcome}})
 
     @server.tool()
     async def acquisition_request_candidate_attention_research(
