@@ -1,3 +1,4 @@
+gha-creds-*.json
 .env*
 !.env.example
 .pytest_cache/
