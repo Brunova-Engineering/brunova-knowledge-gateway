@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -42,12 +43,22 @@ def ready(revision: dict[str, Any]) -> bool:
     )
 
 
+def resolved_image(commit_image: str, digest: str) -> str:
+    if not re.fullmatch(r"sha256:[a-f0-9]{64}", digest):
+        raise SystemExit("Artifact Registry did not return a valid image digest.")
+    repository, separator, tag = commit_image.rpartition(":")
+    if not separator or not repository or not re.fullmatch(r"[a-f0-9]{40}", tag):
+        raise SystemExit("Expected image must carry the exact commit SHA tag.")
+    return f"{repository}@{digest}"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--before")
     parser.add_argument("--after")
     parser.add_argument("--revision")
     parser.add_argument("--image")
+    parser.add_argument("--resolved-digest")
     parser.add_argument("--tag")
     parser.add_argument("--expected-revision")
     parser.add_argument("--github-output")
@@ -144,8 +155,8 @@ def main() -> int:
         return 0
 
     if args.revision:
-        if not args.image or not args.expected_revision:
-            raise SystemExit("--image and --expected-revision are required for a revision health check.")
+        if not args.image or not args.expected_revision or not args.resolved_digest:
+            raise SystemExit("--image, --resolved-digest and --expected-revision are required for a revision health check.")
         revision = read_json(args.revision)
         revision_name = revision.get("metadata", {}).get("name")
         containers = revision.get("spec", {}).get("containers", [])
@@ -153,8 +164,9 @@ def main() -> int:
             raise SystemExit("Cloud Run returned an unexpected revision name.")
         if not ready(revision):
             raise SystemExit("The deployed Cloud Run revision is not ready.")
-        if not containers or containers[0].get("image") != args.image:
-            raise SystemExit("The deployed revision does not reference the expected commit image.")
+        expected = resolved_image(args.image, args.resolved_digest)
+        if not containers or containers[0].get("image") != expected or revision.get("status", {}).get("imageDigest") != expected:
+            raise SystemExit("The deployed revision does not reference the expected commit image digest.")
         print(f"Verified ready Cloud Run revision {revision_name}.")
         return 0
 

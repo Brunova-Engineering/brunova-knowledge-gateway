@@ -179,9 +179,14 @@ jobs:
             --project="$GCP_PROJECT_ID" \
             --region="$GCP_REGION" \
             --format=json > "$RUNNER_TEMP/cloud-run-revision.json"
+          digest="$(gcloud artifacts docker images describe \
+            "${{ steps.image.outputs.image }}" \
+            --project="$GCP_PROJECT_ID" \
+            --format='value(image_summary.digest)')"
           python scripts/verify_cloud_run_deployment.py \
             --revision "$RUNNER_TEMP/cloud-run-revision.json" \
             --image "${{ steps.image.outputs.image }}" \
+            --resolved-digest "$digest" \
             --expected-revision "$revision"
 
       - name: Mint Cloud Run invocation identity token
