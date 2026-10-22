@@ -26,14 +26,14 @@ def traffic_without_release_tag(service: dict[str, Any], release_tag: str) -> li
     return sorted(entries, key=lambda entry: (entry.get("tag", ""), entry.get("revisionName", "")))
 
 
-def active_traffic(service: dict[str, Any]) -> list[dict[str, Any]]:
+def active_traffic(service: dict[str, Any]) -> list[tuple[str, str, int]]:
     """Ignore untagged zero-percent revision entries, which carry no traffic."""
     entries = [
-        entry
+        (entry.get("revisionName", ""), entry.get("tag", ""), entry.get("percent", 0))
         for entry in service.get("status", {}).get("traffic", [])
         if entry.get("tag") or entry.get("percent", 0) > 0
     ]
-    return sorted(entries, key=lambda entry: (entry.get("tag", ""), entry.get("revisionName", "")))
+    return sorted(entries, key=lambda entry: (entry[1], entry[0]))
 
 
 def ready(revision: dict[str, Any]) -> bool:
@@ -84,26 +84,29 @@ def main() -> int:
     if args.before and args.after:
         before, after = read_json(args.before), read_json(args.after)
         if args.verify_traffic_restored:
-            restored = [entry for entry in active_traffic(after) if entry.get("tag") != args.ignore_tag]
+            restored = [entry for entry in active_traffic(after) if entry[1] != args.ignore_tag]
             if active_traffic(before) != restored:
                 raise SystemExit("Cloud Run traffic assignments were not restored after verification.")
             print("Verified original Cloud Run traffic assignments are restored.")
             return 0
 
         if args.verify_promoted_revision:
-            expected = [{"revisionName": args.verify_promoted_revision, "percent": 100}]
-            promoted = [entry for entry in active_traffic(after) if not entry.get("tag")]
-            if promoted != expected:
+            promoted = [entry for entry in after.get("status", {}).get("traffic", [])
+                        if entry.get("percent", 0) > 0]
+            if len(promoted) != 1 or promoted[0].get("revisionName") != args.verify_promoted_revision \
+                    or promoted[0].get("percent") != 100:
                 raise SystemExit("Production traffic is not assigned 100% to the verified revision.")
             before_tags = [
-                entry for entry in before.get("status", {}).get("traffic", [])
+                (entry.get("tag"), entry.get("revisionName"))
+                for entry in before.get("status", {}).get("traffic", [])
                 if entry.get("tag") and entry.get("tag") != args.ignore_tag
             ]
             after_tags = [
-                entry for entry in after.get("status", {}).get("traffic", [])
+                (entry.get("tag"), entry.get("revisionName"))
+                for entry in after.get("status", {}).get("traffic", [])
                 if entry.get("tag") and entry.get("tag") != args.ignore_tag
             ]
-            if sorted(before_tags, key=lambda entry: entry["tag"]) != sorted(after_tags, key=lambda entry: entry["tag"]):
+            if sorted(before_tags) != sorted(after_tags):
                 raise SystemExit("Existing tagged Cloud Run routes changed during promotion.")
             print("Verified 100% production traffic on the verified revision and preserved tagged routes.")
             return 0
