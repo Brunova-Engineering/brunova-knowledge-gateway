@@ -101,6 +101,9 @@ jobs:
           project_id: ${{ vars.GCP_PROJECT_ID }}
           version: ">= 363.0.0"
 
+      - name: Install MCP verification dependency
+        run: python -m pip install 'httpx>=0.28,<1'
+
       - name: Build and push image for this commit
         id: image
         shell: bash
