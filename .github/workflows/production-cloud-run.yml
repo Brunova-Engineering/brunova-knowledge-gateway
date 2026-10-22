@@ -124,7 +124,14 @@ jobs:
       - name: Choose a temporary revision verification tag
         id: release
         shell: bash
-        run: echo "tag=sha-${GITHUB_SHA:0:12}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          tag="v-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          if (( ${#CLOUD_RUN_SERVICE} + ${#tag} > 46 )); then
+            echo "::error::Cloud Run service name and verification tag exceed 46 characters."
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Confirm the temporary tag is not already in use
         shell: bash
