@@ -5,7 +5,7 @@ to `main`, then deploys only the exact triggering commit when it is still the
 current `main` head. A manual run is accepted only from `main`. Images use the
 full GitHub commit SHA as the Artifact Registry tag.
 
-The deployment creates a uniquely tagged Cloud Run revision with `--no-traffic`
+The deployment creates a temporarily tagged Cloud Run revision with `--no-traffic`
 so production traffic stays unchanged during initial checks. It checks that the
 runtime service account, container settings, environment, and revision settings
 did not change, then verifies the tagged revision is Ready and answers
@@ -35,9 +35,10 @@ Configure these repository variables:
 | `CLOUD_RUN_SERVICE` | `brunova-knowledge-gateway` |
 | `ARTIFACT_REGISTRY_REPOSITORY` | `cloud-run-source-deploy` |
 
-Read-only inspection on 2026-10-22 found the service at revision
-`brunova-knowledge-gateway-00099-m5m`, with 100% of production traffic assigned
-to that revision and several existing zero-percent tagged revision routes. The
+The first successful CI run on 2026-10-22 promoted the exact `main` image for
+commit `0a3fe42f11daf6dfcd853383295847de65b7bcd4` to revision
+`brunova-knowledge-gateway-00167-noh`, with 100% of production traffic assigned
+to that revision. Existing zero-percent tagged routes were preserved. The
 service uses the `brunova-knowledge-agent` runtime identity and listens on port
 8080. The workflow reads live configuration before deployment and preserves
 the actual traffic assignments it finds at run time.
@@ -92,13 +93,21 @@ revision, it validates that only the image changed, existing traffic assignments
 are preserved, the new revision is ready, the revision health endpoint responds,
 and the authenticated MCP catalog is well formed with unique tool names.
 
-The temporary release tag combines `sha-`, the first 12 characters of the
-commit SHA, the GitHub run ID, and the run attempt, so reruns use a fresh tag.
-The workflow refuses to create a tag that already exists and removes only its
+The temporary release tag is `ci-v1`. The application permits only that exact
+tagged hostname for this Cloud Run service during revision verification;
+normal MCP host protection remains enabled. The workflow serializes deployments,
+refuses to create a tag that already exists and removes only its
 own tag after verification, including when a health or MCP check fails. A failed
 post-promotion health or MCP check triggers rollback to the exact
 prior active revision traffic percentages captured before deployment. The
 workflow does not delete old revisions or existing tags.
+
+Cloud Run stores the revision image as a digest even when deployment used the
+full commit SHA tag. CI resolves that tag through Artifact Registry and requires
+the revision image and `imageDigest` to match. Promotion checks the sole 100%
+route even when Cloud Run temporarily attaches `ci-v1` to it. The successful
+run verified the authenticated MCP catalog on both the staged revision and
+production service, then removed `ci-v1`.
 
 The MCP application token is a separate Gateway authorization boundary from
 Google WIF. If the verifier token needs rotation, rotate its limited signal
