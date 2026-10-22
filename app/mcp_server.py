@@ -2850,11 +2850,23 @@ def _csv_environment(name: str, default: str = "") -> list[str]:
     return [item.strip() for item in os.getenv(name, default).split(",") if item.strip()]
 
 
+def _mcp_allowed_hosts_with_ci_tag(hosts: list[str], service: str | None) -> list[str]:
+    """Trust one exact temporary Cloud Run verification host for this service."""
+    if service != "brunova-knowledge-gateway":
+        return hosts
+    canonical = [host for host in hosts if re.fullmatch(
+        r"brunova-knowledge-gateway-[a-z0-9]+-uc\.a\.run\.app", host
+    )]
+    if len(canonical) != 1:
+        return hosts
+    return [*hosts, f"ci-v1---{canonical[0]}"]
+
+
 transport_security = TransportSecuritySettings(
     enable_dns_rebinding_protection=True,
-    allowed_hosts=_csv_environment(
-        "MCP_ALLOWED_HOSTS",
-        "localhost:*,127.0.0.1:*",
+    allowed_hosts=_mcp_allowed_hosts_with_ci_tag(
+        _csv_environment("MCP_ALLOWED_HOSTS", "localhost:*,127.0.0.1:*"),
+        os.getenv("K_SERVICE"),
     ),
     allowed_origins=_csv_environment("MCP_ALLOWED_ORIGINS"),
 )
