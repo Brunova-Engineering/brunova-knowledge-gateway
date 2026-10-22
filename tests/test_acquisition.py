@@ -825,3 +825,89 @@ def test_linkedin_contact_with_named_recipient_is_passed_as_structured_data(monk
     assert unpack(asyncio.run(mcp_server.call_tool("acquisition_record_candidate_contact_method", method)))["httpStatus"] == 202
     payload = json.loads(calls[0].content)["request"]
     assert payload["channelType"] == "LINKEDIN" and payload["contactName"] == "María López"
+
+
+def test_candidate_contact_preparation_is_internal_and_keeps_exact_context(monkeypatch):
+    calls = []
+    def handler(request):
+        calls.append(request)
+        if request.method == "GET":
+            return httpx.Response(200, json={"preparations": []})
+        return httpx.Response(202, json={"status": "recorded", "externalEffect": False,
+                                        "sendAuthorized": False})
+    configure(monkeypatch, handler)
+    args = dict(command_id="prepare-one", cycle_id="cycle", company_id="candidate",
+                link_id="selected-link", expected_stage_version=5, method_id="method-one",
+                subject="A question about your operation",
+                message_text="Hello, could we learn how your cold-chain handoff works today?",
+                rationale="The observed process and sourced contact method warrant this question.",
+                evidence_refs=["https://example.test/process"])
+    result = unpack(asyncio.run(mcp_server.call_tool("acquisition_prepare_candidate_contact", args)))
+    assert result["data"]["sendAuthorized"] is False
+    assert calls[0].method == "POST" and calls[0].url.path.endswith("/exploration/contact-preparations")
+    assert json.loads(calls[0].content) == {"commandId": args["command_id"], "request": {
+        "cycleId": "cycle", "companyId": "candidate", "linkId": "selected-link",
+        "expectedStageVersion": 5, "methodId": "method-one", "subject": args["subject"],
+        "messageText": args["message_text"], "rationale": args["rationale"],
+        "evidenceRefs": args["evidence_refs"]}}
+    read = unpack(asyncio.run(mcp_server.call_tool(
+        "acquisition_list_candidate_contact_preparations", {"cycle_id": "cycle"})))
+    assert read["data"] == {"preparations": []}
+    assert calls[1].method == "GET" and calls[1].url.params["cycleId"] == "cycle"
+    bad = dict(args, command_id="prepare-bad", evidence_refs=["http://example.test/process"])
+    assert asyncio.run(mcp_server.call_tool("acquisition_prepare_candidate_contact", bad)).is_error
+    assert len(calls) == 2
+
+
+def test_candidate_contact_attempt_read_uses_governed_backend(monkeypatch):
+    calls = []
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, json={"truncated": False, "attempts": [{
+            "companyId": "candidate", "intentId": "intent-one", "outcome": "OUTCOME_UNKNOWN",
+            "providerReceiptId": None}]})
+    configure(monkeypatch, handler)
+    result = unpack(asyncio.run(mcp_server.call_tool(
+        "acquisition_list_candidate_contact_attempts", {"cycle_id": "cycle"})))
+    assert result["data"]["attempts"][0]["outcome"] == "OUTCOME_UNKNOWN"
+    assert len(calls) == 1
+    assert calls[0].method == "GET"
+    assert calls[0].url.path.endswith("/exploration/contact-attempts")
+    assert calls[0].url.params["cycleId"] == "cycle"
+
+
+def test_candidate_contact_reply_read_does_not_infer_crm_mutation(monkeypatch):
+    calls = []
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, json={"truncated": False, "replies": [{
+            "replyId": "reply-one", "originalText": "Sí, conversemos.",
+            "classification": None}]})
+    configure(monkeypatch, handler)
+    result = unpack(asyncio.run(mcp_server.call_tool(
+        "acquisition_list_candidate_contact_replies", {"cycle_id": "cycle"})))
+    assert result["data"]["replies"][0]["classification"] is None
+    assert len(calls) == 1
+    assert calls[0].method == "GET"
+    assert calls[0].url.path.endswith("/exploration/contact-replies")
+
+
+def test_candidate_contact_reply_interpretation_is_bound_and_has_no_external_effect(monkeypatch):
+    calls = []
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(202, json={"status": "interpreted", "externalEffect": False,
+                                         "crmMutation": False, "classification": "POSITIVE"})
+    configure(monkeypatch, handler)
+    args = dict(command_id="interpret-one", cycle_id="cycle", company_id="candidate",
+                reply_id="reply-one", expected_stage_version=6, classification="POSITIVE",
+                interest_summary="La empresa pidió conversar sobre el relevo de inventario.",
+                rationale="La respuesta original invita explícitamente a continuar la conversación.")
+    result = unpack(asyncio.run(mcp_server.call_tool("acquisition_interpret_candidate_contact_reply", args)))
+    assert result["data"]["crmMutation"] is False
+    assert calls[0].method == "POST"
+    assert calls[0].url.path.endswith("/exploration/contact-replies/interpretations")
+    assert json.loads(calls[0].content) == {"commandId": "interpret-one", "request": {
+        "cycleId": "cycle", "companyId": "candidate", "replyId": "reply-one",
+        "expectedStageVersion": 6, "classification": "POSITIVE",
+        "interestSummary": args["interest_summary"], "rationale": args["rationale"]}}

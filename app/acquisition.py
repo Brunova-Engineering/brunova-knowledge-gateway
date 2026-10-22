@@ -42,6 +42,11 @@ TOOLS = frozenset({
     "acquisition_revise_candidate_fit_copy",
     "acquisition_record_candidate_attention",
     "acquisition_record_candidate_contact_method",
+    "acquisition_list_candidate_contact_preparations",
+    "acquisition_list_candidate_contact_attempts",
+    "acquisition_list_candidate_contact_replies",
+    "acquisition_prepare_candidate_contact",
+    "acquisition_interpret_candidate_contact_reply",
     "acquisition_record_candidate_whatsapp_check",
     "acquisition_check_candidate_whatsapp",
     "acquisition_request_candidate_attention_research",
@@ -284,6 +289,56 @@ def register_acquisition_tools(server: Any) -> None:
                 "expectedStageVersion": expected_stage_version, "channelType": channel_type,
                 "channelValue": channel_value, "sourceUrl": source_url,
                 "attribution": attribution, **({"contactName": contact_name} if contact_name else {})}})
+
+    @server.tool()
+    async def acquisition_list_candidate_contact_preparations(cycle_id: Identifier) -> CallToolResult:
+        """Read the latest internal message preparation for each candidate in this cycle. A preparation is not a send receipt."""
+        return await portal_request("GET", "/exploration/contact-preparations", params={"cycleId": cycle_id})
+
+    @server.tool()
+    async def acquisition_list_candidate_contact_attempts(cycle_id: Identifier) -> CallToolResult:
+        """Read governed intent and provider receipt status for this cycle. An intent or uncertain outcome is not proof of delivery."""
+        return await portal_request("GET", "/exploration/contact-attempts", params={"cycleId": cycle_id})
+
+    @server.tool()
+    async def acquisition_list_candidate_contact_replies(cycle_id: Identifier) -> CallToolResult:
+        """Read attributed inbound reply evidence and Panky's separate interpretation. No CRM transition is implied."""
+        return await portal_request("GET", "/exploration/contact-replies", params={"cycleId": cycle_id})
+
+    @server.tool()
+    async def acquisition_prepare_candidate_contact(
+            command_id: Identifier, cycle_id: Identifier, company_id: Identifier,
+            link_id: Identifier, expected_stage_version: Annotated[int, Field(ge=1)],
+            method_id: Identifier, message_text: Annotated[str, Field(min_length=30, max_length=4000)],
+            rationale: Annotated[str, Field(min_length=20, max_length=1000)],
+            evidence_refs: Annotated[list[str], Field(min_length=1, max_length=8)],
+            subject: Annotated[str | None, Field(min_length=4, max_length=160)] = None) -> CallToolResult:
+        """Version one sourced, channel-specific message for a SELECTED candidate. No send or CRM write occurs."""
+        for ref in evidence_refs:
+            parsed = urlsplit(ref)
+            if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or len(ref) > 1000:
+                raise ValueError("attributed HTTPS evidence required")
+        request: dict[str, Any] = {"cycleId": cycle_id, "companyId": company_id, "linkId": link_id,
+            "expectedStageVersion": expected_stage_version, "methodId": method_id,
+            "messageText": message_text, "rationale": rationale, "evidenceRefs": evidence_refs}
+        if subject is not None:
+            request["subject"] = subject
+        return await portal_request("POST", "/exploration/contact-preparations", body={
+            "commandId": command_id, "request": request})
+
+    @server.tool()
+    async def acquisition_interpret_candidate_contact_reply(
+            command_id: Identifier, cycle_id: Identifier, company_id: Identifier,
+            reply_id: Identifier, expected_stage_version: Annotated[int, Field(ge=1)],
+            classification: Literal["POSITIVE", "NEGATIVE", "OPT_OUT", "BAD_TIMING", "QUESTION", "UNCERTAIN"],
+            interest_summary: Annotated[str, Field(min_length=12, max_length=1000)],
+            rationale: Annotated[str, Field(min_length=20, max_length=1000)]) -> CallToolResult:
+        """Interpret one attributed provider reply in the current candidate context. This records no send or HubSpot mutation."""
+        return await portal_request("POST", "/exploration/contact-replies/interpretations", body={
+            "commandId": command_id, "request": {"cycleId": cycle_id, "companyId": company_id,
+                "replyId": reply_id, "expectedStageVersion": expected_stage_version,
+                "classification": classification, "interestSummary": interest_summary,
+                "rationale": rationale}})
 
     @server.tool()
     async def acquisition_check_candidate_whatsapp(
