@@ -129,7 +129,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          tag="v-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          tag="ci-v1"
           if (( ${#CLOUD_RUN_SERVICE} + ${#tag} > 46 )); then
             echo "::error::Cloud Run service name and verification tag exceed 46 characters."
             exit 1
