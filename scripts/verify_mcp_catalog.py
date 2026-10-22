@@ -101,10 +101,10 @@ def main() -> int:
             seen_cursors.add(cursor)
             request_id += 1
 
-    if not names:
-        raise RuntimeError("MCP tools/list returned an empty catalog.")
     if len(names) != len(set(names)):
         raise RuntimeError("MCP tools/list returned duplicate tool names.")
+    if names != ["list_agent_signals"]:
+        raise RuntimeError("MCP verifier principal has an unexpected capability catalog.")
 
     print(f"Verified authenticated MCP catalog with {len(names)} tools.")
     return 0

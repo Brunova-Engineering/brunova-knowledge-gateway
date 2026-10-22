@@ -24,7 +24,7 @@ Configure these repository secrets:
 | --- | --- |
 | `GCP_WORKLOAD_IDENTITY_PROVIDER` | Full resource name of the GitHub OIDC WIF provider |
 | `GCP_DEPLOY_SERVICE_ACCOUNT` | Email of the narrowly scoped deploy service account |
-| `GATEWAY_MCP_VERIFY_TOKEN` | Token for a dedicated active developer principal with read-only MCP access |
+| `GATEWAY_MCP_VERIFY_TOKEN` | Token for a dedicated active signal principal limited to `list_agent_signals` |
 
 Configure these repository variables:
 
@@ -42,9 +42,11 @@ service uses the `brunova-knowledge-agent` runtime identity and listens on port
 8080. The workflow reads live configuration before deployment and preserves
 the actual traffic assignments it finds at run time.
 
-The MCP token must belong to a dedicated developer principal with at least one
-visible read-only tool so the workflow can validate the catalog. Do not use the
-management token or a Google service-account key. The workflow separately
+The MCP token belongs to a dedicated `signal_worker` principal with only the
+`list` operation for `acquisition_work_available`. The verifier requires its
+catalog to contain exactly `list_agent_signals`, so any expansion of CI token
+permissions fails the deployment. Do not use the management token or a Google
+service-account key. The workflow separately
 mints a short-lived Cloud Run identity token for the deploy service account and
 sends it in `X-Serverless-Authorization`; the Gateway token remains in the
 application's `Authorization` header. Neither token is printed or embedded in
@@ -99,8 +101,8 @@ prior active revision traffic percentages captured before deployment. The
 workflow does not delete old revisions or existing tags.
 
 The MCP application token is a separate Gateway authorization boundary from
-Google WIF. If the verifier token needs rotation, rotate its developer principal
-through the governed Gateway process and update the GitHub secret separately.
+Google WIF. If the verifier token needs rotation, rotate its limited signal
+principal through the governed Gateway process and update the GitHub secret.
 
 References: [GitHub Actions WIF setup](https://github.com/google-github-actions/auth),
 [Cloud Run deployment permissions](https://docs.cloud.google.com/run/docs/reference/iam/roles),
