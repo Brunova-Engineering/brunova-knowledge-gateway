@@ -43,3 +43,35 @@ def test_revision_rejects_mismatched_resolved_digest(tmp_path, monkeypatch):
                                      "--expected-revision", "gateway-00157"])
     with pytest.raises(SystemExit, match="expected commit image digest"):
         deployment.main()
+
+
+def test_promotion_and_rollback_accept_tagged_100_percent_route(tmp_path, monkeypatch):
+    prior = "gateway-00099"
+    staged = "gateway-00163"
+    preserved = {"revisionName": "gateway-00083", "tag": "n8n-canary", "url": "https://example.test/tag"}
+    before = tmp_path / "before.json"
+    after = tmp_path / "after.json"
+    before.write_text(json.dumps({"status": {"traffic": [
+        preserved, {"revisionName": prior, "percent": 100}
+    ]}}), encoding="utf-8")
+    after.write_text(json.dumps({"status": {"traffic": [
+        {**preserved, "latestRevision": False},
+        {"revisionName": staged, "tag": "ci-v1", "percent": 100,
+         "url": "https://example.test/ci"},
+        {"revisionName": prior, "percent": 0},
+    ]}}), encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["verify", "--before", str(before),
+                                     "--after", str(after),
+                                     "--verify-promoted-revision", staged,
+                                     "--ignore-tag", "ci-v1"])
+    assert deployment.main() == 0
+
+    after.write_text(json.dumps({"status": {"traffic": [
+        {**preserved, "latestRevision": False},
+        {"revisionName": prior, "percent": 100},
+        {"revisionName": staged, "tag": "ci-v1"},
+    ]}}), encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["verify", "--before", str(before),
+                                     "--after", str(after),
+                                     "--verify-traffic-restored", "--ignore-tag", "ci-v1"])
+    assert deployment.main() == 0
