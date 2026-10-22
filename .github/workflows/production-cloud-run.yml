@@ -1,0 +1,303 @@
+name: Production Cloud Run
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: brunova-knowledge-gateway-production
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Test exact commit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out triggering commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Run test suite
+        run: python -m pytest -q
+
+  deploy:
+    name: Deploy verified main revision
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      GCP_WIF_PROVIDER: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+      GCP_DEPLOY_SERVICE_ACCOUNT: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_REGION: ${{ vars.GCP_REGION }}
+      CLOUD_RUN_SERVICE: ${{ vars.CLOUD_RUN_SERVICE }}
+      ARTIFACT_REGISTRY_REPOSITORY: ${{ vars.ARTIFACT_REGISTRY_REPOSITORY }}
+    steps:
+      - name: Check out triggering commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Confirm this is still the main commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git fetch --quiet origin refs/heads/main:refs/remotes/origin/main
+          if [[ "$(git rev-parse refs/remotes/origin/main)" != "$GITHUB_SHA" ]]; then
+            echo "::error::The triggering commit is no longer the current main commit."
+            exit 1
+          fi
+
+      - name: Check required deployment configuration
+        env:
+          GATEWAY_MCP_VERIFY_TOKEN: ${{ secrets.GATEWAY_MCP_VERIFY_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in \
+            GCP_WIF_PROVIDER \
+            GCP_DEPLOY_SERVICE_ACCOUNT \
+            GCP_PROJECT_ID \
+            GCP_REGION \
+            CLOUD_RUN_SERVICE \
+            ARTIFACT_REGISTRY_REPOSITORY \
+            GATEWAY_MCP_VERIFY_TOKEN; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error title=Missing configuration::$name must be configured before deployment."
+              exit 1
+            fi
+          done
+
+      - name: Set up Google Cloud authentication
+        id: auth
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+
+      - name: Set up Google Cloud CLI
+        id: gcloud
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          version: ">= 363.0.0"
+
+      - name: Build and push image for this commit
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REGISTRY_REPOSITORY}/${CLOUD_RUN_SERVICE}:${GITHUB_SHA}"
+          gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+          docker build --pull --tag "$image" .
+          docker push "$image"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      - name: Save current service configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcloud run services describe "$CLOUD_RUN_SERVICE" \
+            --project="$GCP_PROJECT_ID" \
+            --region="$GCP_REGION" \
+            --format=json > "$RUNNER_TEMP/cloud-run-before.json"
+
+      - name: Choose a temporary revision verification tag
+        id: release
+        shell: bash
+        run: echo "tag=sha-${GITHUB_SHA:0:12}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+
+      - name: Confirm the temporary tag is not already in use
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - "$RUNNER_TEMP/cloud-run-before.json" "${{ steps.release.outputs.tag }}" <<'PY'
+          import json
+          import sys
+          service = json.load(open(sys.argv[1], encoding="utf-8"))
+          tag = sys.argv[2]
+          if any(route.get("tag") == tag for route in service.get("status", {}).get("traffic", [])):
+              raise SystemExit("Temporary verification tag already exists; refusing to overwrite it.")
+          PY
+
+      - name: Create a tagged revision without changing production traffic
+        id: create_revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcloud run deploy "$CLOUD_RUN_SERVICE" \
+            --project="$GCP_PROJECT_ID" \
+            --region="$GCP_REGION" \
+            --image="${{ steps.image.outputs.image }}" \
+            --no-traffic \
+            --tag="${{ steps.release.outputs.tag }}" \
+            --quiet
+          echo "release_tag=${{ steps.release.outputs.tag }}" >> "$GITHUB_ENV"
+
+      - name: Verify revision, service configuration, and existing traffic
+        id: deployed
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcloud run services describe "$CLOUD_RUN_SERVICE" \
+            --project="$GCP_PROJECT_ID" \
+            --region="$GCP_REGION" \
+            --format=json > "$RUNNER_TEMP/cloud-run-after.json"
+          revision="$(python scripts/verify_cloud_run_deployment.py \
+            --before "$RUNNER_TEMP/cloud-run-before.json" \
+            --after "$RUNNER_TEMP/cloud-run-after.json" \
+            --image "${{ steps.image.outputs.image }}" \
+            --tag "$release_tag" \
+            --github-output "$GITHUB_OUTPUT")"
+          gcloud run revisions describe "$revision" \
+            --project="$GCP_PROJECT_ID" \
+            --region="$GCP_REGION" \
+            --format=json > "$RUNNER_TEMP/cloud-run-revision.json"
+          python scripts/verify_cloud_run_deployment.py \
+            --revision "$RUNNER_TEMP/cloud-run-revision.json" \
+            --image "${{ steps.image.outputs.image }}" \
+            --expected-revision "$revision"
+
+      - name: Mint Cloud Run invocation identity token
+        id: invoker_token
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          token_format: id_token
+          id_token_audience: ${{ steps.deployed.outputs.service_url }}
+          id_token_include_email: true
+
+      - name: Check tagged revision health
+        env:
+          REVISION_URL: ${{ steps.deployed.outputs.url }}
+          CLOUD_RUN_ID_TOKEN: ${{ steps.invoker_token.outputs.id_token }}
+        run: |
+          curl --fail --silent --show-error --max-time 30 \
+            -H "X-Serverless-Authorization: Bearer ${CLOUD_RUN_ID_TOKEN}" \
+            "${REVISION_URL}/health"
+
+      - name: Verify authenticated MCP catalog on the tagged revision
+        env:
+          MCP_URL: ${{ steps.deployed.outputs.url }}/mcp/
+          MCP_VERIFY_TOKEN: ${{ secrets.GATEWAY_MCP_VERIFY_TOKEN }}
+          CLOUD_RUN_ID_TOKEN: ${{ steps.invoker_token.outputs.id_token }}
+        run: python scripts/verify_mcp_catalog.py
+
+      - name: Promote verified revision to 100% production traffic
+        id: promote
+        shell: bash
+        run: |
+          set -euo pipefail
+          revision="${{ steps.deployed.outputs.revision }}"
+          echo "promotion_attempted=true" >> "$GITHUB_OUTPUT"
+          gcloud run services update-traffic "$CLOUD_RUN_SERVICE" \
+            --project="$GCP_PROJECT_ID" \
+            --region="$GCP_REGION" \
+            --to-revisions="${revision}=100" \
+            --quiet
+          gcloud run services describe "$CLOUD_RUN_SERVICE" \
+            --project="$GCP_PROJECT_ID" \
+            --region="$GCP_REGION" \
+            --format=json > "$RUNNER_TEMP/cloud-run-after-promotion.json"
+          python scripts/verify_cloud_run_deployment.py \
+            --before "$RUNNER_TEMP/cloud-run-before.json" \
+            --after "$RUNNER_TEMP/cloud-run-after-promotion.json" \
+            --verify-promoted-revision "$revision" \
+            --ignore-tag "${{ steps.release.outputs.tag }}"
+
+      - name: Check promoted production health
+        id: production_health
+        if: steps.promote.outcome == 'success'
+        env:
+          PRODUCTION_URL: ${{ steps.deployed.outputs.service_url }}
+          CLOUD_RUN_ID_TOKEN: ${{ steps.invoker_token.outputs.id_token }}
+        run: |
+          curl --fail --silent --show-error --max-time 30 \
+            -H "X-Serverless-Authorization: Bearer ${CLOUD_RUN_ID_TOKEN}" \
+            "${PRODUCTION_URL}/health"
+
+      - name: Verify authenticated MCP catalog on production service
+        id: production_mcp
+        if: steps.promote.outcome == 'success' && steps.production_health.outcome == 'success'
+        env:
+          MCP_URL: ${{ steps.deployed.outputs.service_url }}/mcp/
+          MCP_VERIFY_TOKEN: ${{ secrets.GATEWAY_MCP_VERIFY_TOKEN }}
+          CLOUD_RUN_ID_TOKEN: ${{ steps.invoker_token.outputs.id_token }}
+        run: python scripts/verify_mcp_catalog.py
+
+      - name: Restore prior production traffic if post-promotion verification fails
+        id: rollback
+        if: failure() && steps.promote.outputs.promotion_attempted == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          targets="$(python scripts/verify_cloud_run_deployment.py \
+            --traffic-targets "$RUNNER_TEMP/cloud-run-before.json")"
+          gcloud run services update-traffic "$CLOUD_RUN_SERVICE" \
+            --project="$GCP_PROJECT_ID" \
+            --region="$GCP_REGION" \
+            --to-revisions="$targets" \
+            --quiet
+          gcloud run services describe "$CLOUD_RUN_SERVICE" \
+            --project="$GCP_PROJECT_ID" \
+            --region="$GCP_REGION" \
+            --format=json > "$RUNNER_TEMP/cloud-run-after-rollback.json"
+          python scripts/verify_cloud_run_deployment.py \
+            --before "$RUNNER_TEMP/cloud-run-before.json" \
+            --after "$RUNNER_TEMP/cloud-run-after-rollback.json" \
+            --verify-traffic-restored \
+            --ignore-tag "${{ steps.release.outputs.tag }}"
+
+      - name: Remove temporary verification tag
+        if: always() && steps.auth.outcome == 'success' && steps.gcloud.outcome == 'success' && steps.release.outcome == 'success' && steps.create_revision.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcloud run services describe "$CLOUD_RUN_SERVICE" \
+            --project="$GCP_PROJECT_ID" \
+            --region="$GCP_REGION" \
+            --format=json > "$RUNNER_TEMP/cloud-run-cleanup-before.json"
+          if python - "$RUNNER_TEMP/cloud-run-cleanup-before.json" "${{ steps.release.outputs.tag }}" <<'PY'
+          import json
+          import sys
+          service = json.load(open(sys.argv[1], encoding="utf-8"))
+          tag = sys.argv[2]
+          raise SystemExit(0 if any(route.get("tag") == tag for route in service.get("status", {}).get("traffic", [])) else 1)
+          PY
+          then
+            gcloud run services update-traffic "$CLOUD_RUN_SERVICE" \
+              --project="$GCP_PROJECT_ID" \
+              --region="$GCP_REGION" \
+              --remove-tags="${{ steps.release.outputs.tag }}" \
+              --quiet
+          fi
+          if [[ "${{ steps.rollback.outcome }}" == "success" ]]; then
+            gcloud run services describe "$CLOUD_RUN_SERVICE" \
+              --project="$GCP_PROJECT_ID" \
+              --region="$GCP_REGION" \
+              --format=json > "$RUNNER_TEMP/cloud-run-after-cleanup.json"
+            python scripts/verify_cloud_run_deployment.py \
+              --before "$RUNNER_TEMP/cloud-run-before.json" \
+              --after "$RUNNER_TEMP/cloud-run-after-cleanup.json" \
+              --verify-traffic-restored
+          fi
