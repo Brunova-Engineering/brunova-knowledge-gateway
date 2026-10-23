@@ -540,6 +540,7 @@ def test_mcp_exposes_only_governed_tools(monkeypatch):
             "acquisition_list_candidate_contact_preparations",
             "acquisition_get_candidate_contact_cadence",
             "acquisition_list_candidate_contact_attempts",
+            "acquisition_list_candidate_browser_reply_targets",
             "acquisition_list_candidate_contact_replies",
             "acquisition_get_candidate_contact_reply",
             "acquisition_get_candidate_browser_dispatch",

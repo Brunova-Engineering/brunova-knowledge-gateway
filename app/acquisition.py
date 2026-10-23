@@ -47,6 +47,7 @@ TOOLS = frozenset({
     "acquisition_list_candidate_contact_preparations",
     "acquisition_get_candidate_contact_cadence",
     "acquisition_list_candidate_contact_attempts",
+    "acquisition_list_candidate_browser_reply_targets",
     "acquisition_list_candidate_contact_replies",
     "acquisition_get_candidate_contact_reply",
     "acquisition_prepare_candidate_contact",
@@ -367,6 +368,12 @@ def register_acquisition_tools(server: Any) -> None:
     async def acquisition_list_candidate_contact_attempts(cycle_id: Identifier) -> CallToolResult:
         """Read governed intent and provider receipt status for this cycle. An intent or uncertain outcome is not proof of delivery."""
         return await portal_request("GET", "/exploration/contact-attempts", params={"cycleId": cycle_id})
+
+    @server.tool()
+    async def acquisition_list_candidate_browser_reply_targets(cycle_id: Identifier) -> CallToolResult:
+        """Read at most 25 exact Facebook/Instagram threads with a confirmed Engine send. This does not browse or imply a reply."""
+        return await portal_request("GET", "/exploration/contact-browser-reply-targets",
+                                    params={"cycleId": cycle_id})
 
     @server.tool()
     async def acquisition_list_candidate_contact_replies(cycle_id: Identifier) -> CallToolResult:
