@@ -189,6 +189,118 @@ def test_bounds_prohibited_tools_and_scoped_principals(monkeypatch):
         reset_principal(bound)
 
 
+def test_candidate_browser_dispatch_tools_are_management_only_and_forward_bounded_contract(monkeypatch):
+    calls = []
+    def handler(request):
+        calls.append(request)
+        if request.method == "GET":
+            assert request.url.path.endswith("/exploration/contact-browser-dispatch")
+            assert dict(request.url.params) == {"checkpointId": "checkpoint-1"}
+            return httpx.Response(200, json={"checkpointId": "checkpoint-1"})
+        assert request.url.path.endswith("/exploration/contact-browser-dispatch-observations")
+        assert json.loads(request.content) == {
+            "commandId": "observation-1", "checkpointId": "checkpoint-1",
+            "observation": {"profile": "Brunova", "channel": "FACEBOOK",
+                "senderUrl": "https://www.facebook.com/brunova", "destinationUrl": "https://www.facebook.com/acme",
+                "messageTextHash": "a" * 64, "evidenceId": "evidence-1"}}
+        return httpx.Response(202, json={"status": "recorded"})
+    configure(monkeypatch, handler)
+    assert "acquisition_get_candidate_browser_dispatch" in acquisition.TOOLS
+    assert "acquisition_record_candidate_browser_dispatch_observation" in acquisition.TOOLS
+    assert _tool_authorization_error(Principal.management(), "acquisition_get_candidate_browser_dispatch") is None
+    assert _tool_authorization_error(Principal.management(), "acquisition_record_candidate_browser_dispatch_observation") is None
+    from dataclasses import replace
+    developer = replace(Principal.management(), type="developer")
+    assert _tool_authorization_error(developer, "acquisition_get_candidate_browser_dispatch") == "tool_denied"
+    assert _tool_authorization_error(developer, "acquisition_record_candidate_browser_dispatch_observation") == "tool_denied"
+
+    result = asyncio.run(mcp_server.call_tool("acquisition_get_candidate_browser_dispatch",
+                                               {"checkpoint_id": "checkpoint-1"}))
+    assert unpack(result)["data"]["checkpointId"] == "checkpoint-1"
+    observation = {"command_id": "observation-1", "checkpoint_id": "checkpoint-1",
+        "profile": "Brunova", "channel": "FACEBOOK", "sender_url": "https://www.facebook.com/brunova",
+        "destination_url": "https://www.facebook.com/acme", "message_text_hash": "a" * 64,
+        "evidence_id": "evidence-1"}
+    assert unpack(asyncio.run(mcp_server.call_tool(
+        "acquisition_record_candidate_browser_dispatch_observation", observation))) ["httpStatus"] == 202
+    assert len(calls) == 2
+
+
+def test_candidate_browser_dispatch_observation_rejects_invalid_inputs_before_forwarding(monkeypatch):
+    calls = []
+    configure(monkeypatch, lambda request: calls.append(request) or httpx.Response(202, json={"status": "recorded"}))
+    base = {"command_id": "observation-2", "checkpoint_id": "checkpoint-1", "profile": "Brunova",
+        "channel": "INSTAGRAM", "sender_url": "https://instagram.com/brunova",
+        "destination_url": "https://instagram.com/acme", "message_text_hash": "b" * 64,
+        "evidence_id": "evidence-2"}
+    invalid = [base | {"profile": "Other"}, base | {"channel": "WHATSAPP"},
+        base | {"sender_url": "http://instagram.com/brunova"},
+        base | {"destination_url": "https://user:pass@instagram.com/acme"},
+        base | {"message_text_hash": "B" * 64}, base | {"evidence_id": "../evidence"}]
+    for args in invalid:
+        assert asyncio.run(mcp_server.call_tool(
+            "acquisition_record_candidate_browser_dispatch_observation", args)).is_error
+    assert calls == []
+
+
+def test_exact_candidate_contact_reply_read_is_management_only(monkeypatch):
+    calls = []
+    def handler(request):
+        calls.append(request)
+        assert request.method == "GET"
+        assert request.url.path.endswith("/exploration/contact-reply")
+        assert dict(request.url.params) == {"cycleId": "cycle-1", "companyId": "company-1", "replyId": "reply-1"}
+        return httpx.Response(200, json={"replyId": "reply-1", "originalText": "Sí, podemos conversar."})
+    configure(monkeypatch, handler)
+    assert "acquisition_get_candidate_contact_reply" in acquisition.TOOLS
+    assert _tool_authorization_error(Principal.management(), "acquisition_get_candidate_contact_reply") is None
+    from dataclasses import replace
+    developer = replace(Principal.management(), type="developer")
+    assert _tool_authorization_error(developer, "acquisition_get_candidate_contact_reply") == "tool_denied"
+    result = asyncio.run(mcp_server.call_tool("acquisition_get_candidate_contact_reply", {
+        "cycle_id": "cycle-1", "company_id": "company-1", "reply_id": "reply-1"}))
+    assert unpack(result)["data"]["originalText"] == "Sí, podemos conversar."
+    assert len(calls) == 1
+
+
+def test_candidate_browser_reply_ingestion_forwards_exact_evidence_and_rejects_invalid_inputs(monkeypatch):
+    calls = []
+    def handler(request):
+        calls.append(request)
+        assert request.method == "POST"
+        assert request.url.path.endswith("/exploration/contact-browser-dispatch-replies")
+        return httpx.Response(202, json={"status": "recorded"})
+    configure(monkeypatch, handler)
+    assert "acquisition_record_candidate_browser_dispatch_reply" in acquisition.TOOLS
+    assert _tool_authorization_error(Principal.management(), "acquisition_record_candidate_browser_dispatch_reply") is None
+    from dataclasses import replace
+    developer = replace(Principal.management(), type="developer")
+    assert _tool_authorization_error(developer, "acquisition_record_candidate_browser_dispatch_reply") == "tool_denied"
+    args = {"command_id": "reply-command-1", "intent_id": "intent-1",
+        "provider_account_id": "account-1", "provider_thread_id": "thread-1",
+        "provider_message_id": "message-1", "original_text": "Sí, podemos conversar.",
+        "received_at": "2026-10-23T12:30:00Z", "evidence_id": "cua-" + "c" * 40,
+        "channel": "FACEBOOK", "profile": "Brunova", "sender_url": "https://facebook.com/brunova",
+        "destination_url": "https://facebook.com/messages/t/thread-1", "message_text_hash": "a" * 64}
+    result = asyncio.run(mcp_server.call_tool("acquisition_record_candidate_browser_dispatch_reply", args))
+    assert unpack(result)["httpStatus"] == 202
+    assert json.loads(calls[0].content) == {"commandId": "reply-command-1", "reply": {
+        "intentId": "intent-1", "providerAccountId": "account-1", "providerThreadId": "thread-1",
+        "providerMessageId": "message-1", "originalText": "Sí, podemos conversar.",
+        "receivedAt": "2026-10-23T12:30:00Z", "evidenceId": "cua-" + "c" * 40,
+        "channel": "FACEBOOK", "profile": "Brunova", "senderUrl": "https://facebook.com/brunova",
+        "destinationUrl": "https://facebook.com/messages/t/thread-1", "messageTextHash": "a" * 64}}
+
+    invalid = [args | {"profile": "Other"}, args | {"channel": "WHATSAPP"},
+        args | {"sender_url": "http://facebook.com/brunova"},
+        args | {"destination_url": "https://user:pass@facebook.com/messages/t/thread-1"},
+        args | {"message_text_hash": "A" * 64}, args | {"evidence_id": "browser-" + "c" * 40},
+        args | {"received_at": "2026-10-23T12:30:00"}, args | {"original_text": ""}]
+    for bad in invalid:
+        assert asyncio.run(mcp_server.call_tool("acquisition_record_candidate_browser_dispatch_reply", bad)).is_error
+    assert len(calls) == 1
+
+
 def test_candidate_web_first_direction_preserves_context_and_rejects_source_uri(monkeypatch):
     calls = []
     def handler(request):
@@ -873,6 +985,23 @@ def test_candidate_contact_attempt_read_uses_governed_backend(monkeypatch):
     assert len(calls) == 1
     assert calls[0].method == "GET"
     assert calls[0].url.path.endswith("/exploration/contact-attempts")
+    assert calls[0].url.params["cycleId"] == "cycle"
+
+
+def test_candidate_contact_cadence_is_review_only(monkeypatch):
+    calls = []
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, json={"truncated": False, "candidates": [{
+            "companyId": "candidate", "cadence": {
+                "action": "REVIEW_FOLLOW_UP", "nextAttemptNumber": 2,
+                "sendAuthorized": False}}]})
+    configure(monkeypatch, handler)
+    result = unpack(asyncio.run(mcp_server.call_tool(
+        "acquisition_get_candidate_contact_cadence", {"cycle_id": "cycle"})))
+    assert result["data"]["candidates"][0]["cadence"]["sendAuthorized"] is False
+    assert calls[0].method == "GET"
+    assert calls[0].url.path.endswith("/exploration/contact-cadence")
     assert calls[0].url.params["cycleId"] == "cycle"
 
 
