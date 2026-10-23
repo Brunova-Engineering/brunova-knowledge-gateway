@@ -278,7 +278,7 @@ def test_candidate_browser_reply_ingestion_forwards_exact_evidence_and_rejects_i
     assert _tool_authorization_error(developer, "acquisition_record_candidate_browser_dispatch_reply") == "tool_denied"
     args = {"command_id": "reply-command-1", "intent_id": "intent-1",
         "provider_account_id": "account-1", "provider_thread_id": "thread-1",
-        "provider_message_id": "message-1", "original_text": "Sí, podemos conversar.",
+        "provider_message_id": "mid.$cAAA4xbbxNu2nm4GRTmhajxB0iD2j", "original_text": "Sí, podemos conversar.",
         "received_at": "2026-10-23T12:30:00Z", "evidence_id": "cua-" + "c" * 40,
         "channel": "FACEBOOK", "profile": "Brunova", "sender_url": "https://facebook.com/brunova",
         "destination_url": "https://facebook.com/messages/t/thread-1", "message_text_hash": "a" * 64}
@@ -286,7 +286,7 @@ def test_candidate_browser_reply_ingestion_forwards_exact_evidence_and_rejects_i
     assert unpack(result)["httpStatus"] == 202
     assert json.loads(calls[0].content) == {"commandId": "reply-command-1", "reply": {
         "intentId": "intent-1", "providerAccountId": "account-1", "providerThreadId": "thread-1",
-        "providerMessageId": "message-1", "originalText": "Sí, podemos conversar.",
+        "providerMessageId": "mid.$cAAA4xbbxNu2nm4GRTmhajxB0iD2j", "originalText": "Sí, podemos conversar.",
         "receivedAt": "2026-10-23T12:30:00Z", "evidenceId": "cua-" + "c" * 40,
         "channel": "FACEBOOK", "profile": "Brunova", "senderUrl": "https://facebook.com/brunova",
         "destinationUrl": "https://facebook.com/messages/t/thread-1", "messageTextHash": "a" * 64}}
@@ -295,7 +295,8 @@ def test_candidate_browser_reply_ingestion_forwards_exact_evidence_and_rejects_i
         args | {"sender_url": "http://facebook.com/brunova"},
         args | {"destination_url": "https://user:pass@facebook.com/messages/t/thread-1"},
         args | {"message_text_hash": "A" * 64}, args | {"evidence_id": "browser-" + "c" * 40},
-        args | {"received_at": "2026-10-23T12:30:00"}, args | {"original_text": ""}]
+        args | {"received_at": "2026-10-23T12:30:00"}, args | {"original_text": ""},
+        args | {"provider_message_id": "mid.$bad/segment"}]
     for bad in invalid:
         assert asyncio.run(mcp_server.call_tool("acquisition_record_candidate_browser_dispatch_reply", bad)).is_error
     assert len(calls) == 1

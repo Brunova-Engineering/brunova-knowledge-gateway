@@ -17,6 +17,7 @@ from app.audit import correlation_id, emit_audit_record
 from app.auth.principals import active_principal
 
 Identifier = Annotated[str, Field(min_length=1, max_length=200, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")]
+BrowserMessageId = Annotated[str, Field(min_length=1, max_length=200, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:$-]*$")]
 PageLimit = Annotated[int, Field(ge=1, le=100)]
 Cursor = Annotated[str, Field(min_length=1, max_length=256)]
 TOOLS = frozenset({
@@ -335,7 +336,7 @@ def register_acquisition_tools(server: Any) -> None:
     async def acquisition_record_candidate_browser_dispatch_reply(
             command_id: Identifier, intent_id: Identifier,
             provider_account_id: Identifier, provider_thread_id: Identifier,
-            provider_message_id: Identifier,
+            provider_message_id: BrowserMessageId,
             original_text: Annotated[str, Field(min_length=1, max_length=10000)],
             received_at: Annotated[str, Field(min_length=20, max_length=40)],
             evidence_id: Annotated[str, Field(pattern=r"^cua-[a-f0-9]{40}$")],
