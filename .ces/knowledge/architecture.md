@@ -8,6 +8,8 @@ The Acquisition map read passes through Engine-owned company profiles, field pro
 
 Management-only browser-dispatch tools read one Engine-owned contact checkpoint, record a tightly bounded human-operated observation, and ingest a human-observed Facebook or Instagram reply. Gateway also exposes an exact company/reply read for source verification. It validates the Brunova profile, supported social channels, HTTPS URLs, message hash, reply evidence ID and timestamp, then forwards the exact data through fixed Portal Backend routes. Engine verifies the immutable send and reply context. Gateway does not automate browser activity or perform provider effects.
 
+A separate read-only Management tool lists bounded Facebook and Instagram reply-review targets derived from confirmed Engine sends. The Portal Backend delegates that projection to Engine-owned SQL, returning the latest confirmed intent per destination. A target identifies a thread to inspect; it is never evidence of a reply or permission to send.
+
 ## Evidence
 
 - `app/main.py`

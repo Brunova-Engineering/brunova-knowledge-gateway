@@ -989,6 +989,21 @@ def test_candidate_contact_attempt_read_uses_governed_backend(monkeypatch):
     assert calls[0].url.params["cycleId"] == "cycle"
 
 
+def test_candidate_browser_reply_targets_are_read_only_and_bounded(monkeypatch):
+    calls = []
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, json={"targets": [{"intentId": "confirmed-social"}]})
+    configure(monkeypatch, handler)
+    result = unpack(asyncio.run(mcp_server.call_tool(
+        "acquisition_list_candidate_browser_reply_targets", {"cycle_id": "cycle"})))
+    assert result["data"]["targets"] == [{"intentId": "confirmed-social"}]
+    assert len(calls) == 1
+    assert calls[0].method == "GET"
+    assert calls[0].url.path.endswith("/exploration/contact-browser-reply-targets")
+    assert calls[0].url.params["cycleId"] == "cycle"
+
+
 def test_candidate_contact_cadence_is_review_only(monkeypatch):
     calls = []
     def handler(request):
