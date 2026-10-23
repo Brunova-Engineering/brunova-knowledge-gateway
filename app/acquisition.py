@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from datetime import datetime
 from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
@@ -16,6 +17,7 @@ from app.audit import correlation_id, emit_audit_record
 from app.auth.principals import active_principal
 
 Identifier = Annotated[str, Field(min_length=1, max_length=200, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")]
+BrowserMessageId = Annotated[str, Field(min_length=1, max_length=200, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:$-]*$")]
 PageLimit = Annotated[int, Field(ge=1, le=100)]
 Cursor = Annotated[str, Field(min_length=1, max_length=256)]
 TOOLS = frozenset({
@@ -43,8 +45,10 @@ TOOLS = frozenset({
     "acquisition_record_candidate_attention",
     "acquisition_record_candidate_contact_method",
     "acquisition_list_candidate_contact_preparations",
+    "acquisition_get_candidate_contact_cadence",
     "acquisition_list_candidate_contact_attempts",
     "acquisition_list_candidate_contact_replies",
+    "acquisition_get_candidate_contact_reply",
     "acquisition_prepare_candidate_contact",
     "acquisition_interpret_candidate_contact_reply",
     "acquisition_record_candidate_whatsapp_check",
@@ -53,6 +57,9 @@ TOOLS = frozenset({
     "acquisition_complete_candidate_attention_research",
     "acquisition_record_candidate_filtering_decision",
     "acquisition_record_candidate_link_observation",
+    "acquisition_get_candidate_browser_dispatch",
+    "acquisition_record_candidate_browser_dispatch_observation",
+    "acquisition_record_candidate_browser_dispatch_reply",
     "acquisition_manage_company_profile",
     "acquisition_reconcile_company_identity",
     "acquisition_prepare_conversation", "acquisition_bind_candidate_message",
@@ -296,6 +303,67 @@ def register_acquisition_tools(server: Any) -> None:
         return await portal_request("GET", "/exploration/contact-preparations", params={"cycleId": cycle_id})
 
     @server.tool()
+    async def acquisition_get_candidate_contact_cadence(cycle_id: Identifier) -> CallToolResult:
+        """Read review timing and next-step evidence for contact candidates. A due review never authorizes a send."""
+        return await portal_request("GET", "/exploration/contact-cadence", params={"cycleId": cycle_id})
+
+    @server.tool()
+    async def acquisition_get_candidate_browser_dispatch(checkpoint_id: Identifier) -> CallToolResult:
+        """Read one Management-authorized candidate browser-dispatch checkpoint from the Engine. This does not control a browser or contact a prospect."""
+        return await portal_request("GET", "/exploration/contact-browser-dispatch",
+                                    params={"checkpointId": checkpoint_id})
+
+    @server.tool()
+    async def acquisition_record_candidate_browser_dispatch_observation(
+            command_id: Identifier, checkpoint_id: Identifier,
+            profile: Literal["Brunova"], channel: Literal["FACEBOOK", "INSTAGRAM"],
+            sender_url: Annotated[str, Field(min_length=9, max_length=2000)],
+            destination_url: Annotated[str, Field(min_length=9, max_length=2000)],
+            message_text_hash: Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")],
+            evidence_id: Identifier) -> CallToolResult:
+        """Record one bounded observation from a human-operated Brunova browser dispatch. Gateway does not open pages, send messages, or claim provider effects."""
+        for value in (sender_url, destination_url):
+            parsed = urlsplit(value)
+            if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+                raise ValueError("sender and destination must be HTTPS URLs without embedded credentials")
+        return await portal_request("POST", "/exploration/contact-browser-dispatch-observations", body={
+            "commandId": command_id, "checkpointId": checkpoint_id,
+            "observation": {"profile": profile, "channel": channel, "senderUrl": sender_url,
+                "destinationUrl": destination_url, "messageTextHash": message_text_hash,
+                "evidenceId": evidence_id}})
+
+    @server.tool()
+    async def acquisition_record_candidate_browser_dispatch_reply(
+            command_id: Identifier, intent_id: Identifier,
+            provider_account_id: Identifier, provider_thread_id: Identifier,
+            provider_message_id: BrowserMessageId,
+            original_text: Annotated[str, Field(min_length=1, max_length=10000)],
+            received_at: Annotated[str, Field(min_length=20, max_length=40)],
+            evidence_id: Annotated[str, Field(pattern=r"^cua-[a-f0-9]{40}$")],
+            channel: Literal["FACEBOOK", "INSTAGRAM"], profile: Literal["Brunova"],
+            sender_url: Annotated[str, Field(min_length=9, max_length=2000)],
+            destination_url: Annotated[str, Field(min_length=9, max_length=2000)],
+            message_text_hash: Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]) -> CallToolResult:
+        """Record an observed Facebook or Instagram reply from a human-operated browser dispatch. Engine verifies the exact confirmed send, thread, profile, evidence and chronology. This does not message anyone or write to CRM."""
+        for value in (sender_url, destination_url):
+            parsed = urlsplit(value)
+            if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+                raise ValueError("sender and destination must be HTTPS URLs without embedded credentials")
+        try:
+            timestamp = datetime.fromisoformat(received_at.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("received_at must be an ISO 8601 timestamp with timezone") from exc
+        if timestamp.tzinfo is None:
+            raise ValueError("received_at must be an ISO 8601 timestamp with timezone")
+        return await portal_request("POST", "/exploration/contact-browser-dispatch-replies", body={
+            "commandId": command_id, "reply": {"intentId": intent_id,
+                "providerAccountId": provider_account_id, "providerThreadId": provider_thread_id,
+                "providerMessageId": provider_message_id, "originalText": original_text,
+                "receivedAt": received_at, "evidenceId": evidence_id, "channel": channel,
+                "profile": profile, "senderUrl": sender_url, "destinationUrl": destination_url,
+                "messageTextHash": message_text_hash}})
+
+    @server.tool()
     async def acquisition_list_candidate_contact_attempts(cycle_id: Identifier) -> CallToolResult:
         """Read governed intent and provider receipt status for this cycle. An intent or uncertain outcome is not proof of delivery."""
         return await portal_request("GET", "/exploration/contact-attempts", params={"cycleId": cycle_id})
@@ -304,6 +372,13 @@ def register_acquisition_tools(server: Any) -> None:
     async def acquisition_list_candidate_contact_replies(cycle_id: Identifier) -> CallToolResult:
         """Read attributed inbound reply evidence and Panky's separate interpretation. No CRM transition is implied."""
         return await portal_request("GET", "/exploration/contact-replies", params={"cycleId": cycle_id})
+
+    @server.tool()
+    async def acquisition_get_candidate_contact_reply(
+            cycle_id: Identifier, company_id: Identifier, reply_id: Identifier) -> CallToolResult:
+        """Read one exact original reply and its separate interpretation for the named company. Missing or mismatched replies remain unavailable."""
+        return await portal_request("GET", "/exploration/contact-reply", params={
+            "cycleId": cycle_id, "companyId": company_id, "replyId": reply_id})
 
     @server.tool()
     async def acquisition_prepare_candidate_contact(
