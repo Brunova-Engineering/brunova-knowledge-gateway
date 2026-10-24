@@ -911,6 +911,15 @@ nueva versión de `brunova-principals`. El middleware relee el archivo en cada
 request. Las respuestas de un token revocado o expirado usan el error externo
 seguro `invalid_authentication`; auditoría conserva la causa interna.
 
+El Engine de adquisición puede usar una identidad `whatsapp_worker` distinta
+del token de Management. Su registro requiere `session_id` exacto y
+`operations` limitado a `history` y/o `send`. Su catálogo solo contiene
+`openwa_MessageHistory` y `openwa_MessageSendText`; el Gateway rechaza otra
+sesión, otro tipo de efecto y argumentos no previstos. El Engine conserva la
+responsabilidad de validar el permiso exacto del intento antes de invocar al
+Gateway. El token de este trabajador se guarda en el llavero de la Mac como
+`brunova-acquisition-whatsapp-worker`, nunca en Git ni en el registro JSON.
+
 El token individual debe generarse con un CSPRNG, guardarse en un secreto
 separado accesible al operador y al developer previsto, y convertirse a hash
 antes de crear el registro. No se imprime durante deploy ni se guarda en Git,

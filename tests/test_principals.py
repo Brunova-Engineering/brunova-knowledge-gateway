@@ -14,6 +14,7 @@ from app.auth.principals import (
     PrincipalResolver,
     ProviderScope,
     SignalWorkerPrincipalRecord,
+    WhatsAppWorkerPrincipalRecord,
     authorize_workspace_operation,
     bind_principal,
     reset_principal,
@@ -94,6 +95,23 @@ def test_resolver_supports_restricted_acquisition_signal_worker():
     assert principal.signal_types == frozenset({"acquisition_work_available"})
     assert principal.providers == ProviderScope()
     assert worker_token not in repr(principal)
+
+
+def test_resolver_supports_one_session_whatsapp_worker():
+    token = "whatsapp-worker-token-with-at-least-256-bits-of-randomness"
+    record = WhatsAppWorkerPrincipalRecord.model_validate({
+        "id": "acquisition_whatsapp_worker", "type": "whatsapp_worker",
+        "token_sha256": hashlib.sha256(token.encode()).hexdigest(),
+        "session_id": "brunova", "operations": ["history", "send"],
+    })
+    principal, error = PrincipalResolver("management-token", (record,)).resolve(
+        f"Bearer {token}")
+    assert error is None
+    assert principal.type == "whatsapp_worker"
+    assert principal.whatsapp_session_id == "brunova"
+    assert principal.whatsapp_operations == frozenset({"history", "send"})
+    assert principal.providers == ProviderScope(openwa=True)
+    assert token not in repr(principal)
 
 
 @pytest.mark.parametrize(

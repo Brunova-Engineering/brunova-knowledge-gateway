@@ -1,9 +1,13 @@
 import asyncio
+import hashlib
 
 from mcp import Client
 
 import app.mcp_server as mcp_module
 from app.adapters.openwa.models import OpenWAToolDescriptor
+from app.auth.principals import (
+    Principal, WhatsAppWorkerPrincipalRecord, bind_principal, reset_principal,
+)
 
 
 class FakeOpenWAClient:
@@ -71,6 +75,52 @@ def test_management_projects_and_calls_openwa_write_without_approval(monkeypatch
                           ("MessageSendText", payload), ("MessageSendText", payload)]
     assert all("private-message-body" not in repr(event) for event in audits)
     assert audits[-1]["provider"] == "openwa"
+
+
+def test_whatsapp_worker_sees_only_two_tools_and_rejects_other_session(monkeypatch):
+    fake = FakeOpenWAClient()
+    monkeypatch.setattr(mcp_module, "get_openwa_client", lambda: fake)
+    principal = Principal.from_record(WhatsAppWorkerPrincipalRecord.model_validate({
+        "id": "acquisition_whatsapp_worker", "type": "whatsapp_worker",
+        "token_sha256": hashlib.sha256(b"worker-token").hexdigest(),
+        "session_id": "brunova", "operations": ["history", "send"],
+    }))
+
+    async def scenario():
+        binding = bind_principal(principal)
+        try:
+            catalog = {tool.name for tool in await mcp_module.mcp_server.list_tools()}
+            denied = await mcp_module.mcp_server.call_tool("openwa_MessageSendText", {
+                "sessionId": "another-session", "chatId": "5215512345678@c.us",
+                "text": "This is a sufficiently long exact outbound message.",
+            })
+            history = await mcp_module.mcp_server.call_tool("openwa_MessageHistory", {
+                "sessionId": "brunova", "chatId": "5215512345678@c.us", "limit": 50,
+            })
+            sent = await mcp_module.mcp_server.call_tool("openwa_MessageSendText", {
+                "sessionId": "brunova", "chatId": "5215512345678@c.us",
+                "text": "This is a sufficiently long exact outbound message.",
+            })
+            media = await mcp_module.mcp_server.call_tool("openwa_MessageSendText", {
+                "sessionId": "brunova", "chatId": "5215512345678@c.us",
+                "text": "This is a sufficiently long exact outbound message.",
+                "media": "unapproved",
+            })
+            blocked = await mcp_module.mcp_server.call_tool("openwa_ContactList", {})
+            return catalog, denied, history, sent, media, blocked
+        finally:
+            reset_principal(binding)
+
+    catalog, denied, history, sent, media, blocked = asyncio.run(scenario())
+    assert catalog == {"openwa_MessageHistory", "openwa_MessageSendText"}
+    assert denied.is_error and media.is_error and blocked.is_error
+    assert not history.is_error and not sent.is_error
+    assert fake.calls == [("MessageHistory", {
+        "sessionId": "brunova", "chatId": "5215512345678@c.us", "limit": 50,
+    }), ("MessageSendText", {
+        "sessionId": "brunova", "chatId": "5215512345678@c.us",
+        "text": "This is a sufficiently long exact outbound message.",
+    })]
 
 
 def test_provider_discovery_failures_are_isolated(monkeypatch):
