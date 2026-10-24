@@ -308,26 +308,29 @@ class BrunovaMCPServer(MCPServer):
             )
         ]
         occupied = {tool.name for tool in tools}
-        if principal.type == "management":
-            try:
-                downstream = await get_n8n_client().list_tools()
-            except Exception:
-                # Provider isolation: one outage never hides another provider.
-                downstream = []
-            for descriptor in downstream:
-                exposed_name = _downstream_exposed_name("n8n", descriptor.name, occupied)
-                occupied.add(exposed_name)
-                tools.append(MCPTool(
-                    name=exposed_name,
-                    description=descriptor.description,
-                    input_schema=descriptor.input_schema,
-                    _meta={**descriptor.metadata, "provider": "n8n", "downstream_tool": descriptor.name},
-                ))
+        if principal.type in {"management", "whatsapp_worker"}:
+            if principal.type == "management":
+                try:
+                    downstream = await get_n8n_client().list_tools()
+                except Exception:
+                    downstream = []
+                for descriptor in downstream:
+                    exposed_name = _downstream_exposed_name("n8n", descriptor.name, occupied)
+                    occupied.add(exposed_name)
+                    tools.append(MCPTool(
+                        name=exposed_name,
+                        description=descriptor.description,
+                        input_schema=descriptor.input_schema,
+                        _meta={**descriptor.metadata, "provider": "n8n", "downstream_tool": descriptor.name},
+                    ))
             try:
                 openwa_tools = await get_openwa_client().list_tools()
             except Exception:
                 openwa_tools = []
             for descriptor in openwa_tools:
+                required_operation = {"MessageHistory": "history", "MessageSendText": "send"}.get(descriptor.name)
+                if principal.type == "whatsapp_worker" and required_operation not in principal.whatsapp_operations:
+                    continue
                 exposed_name = _downstream_exposed_name("openwa", descriptor.name, occupied)
                 occupied.add(exposed_name)
                 tools.append(MCPTool(
@@ -454,6 +457,21 @@ class BrunovaMCPServer(MCPServer):
         context: Context | None,
     ) -> CallToolResult:
         request_id = correlation_id(str(context.request_id) if context else None)
+        principal = active_principal()
+        if principal.type == "whatsapp_worker":
+            allowed_keys = ({"sessionId", "chatId", "text"} if name == "openwa_MessageSendText"
+                            else {"sessionId", "chatId", "limit", "deep", "includeMedia"})
+            if (arguments.get("sessionId") != principal.whatsapp_session_id
+                or set(arguments) - allowed_keys
+                or not re.fullmatch(r"\d{8,15}@c\.us", str(arguments.get("chatId", "")))
+                or (name == "openwa_MessageSendText" and (
+                    not isinstance(arguments.get("text"), str)
+                    or not 30 <= len(arguments["text"].strip()) <= 4000))
+                or (name == "openwa_MessageHistory" and (
+                    type(arguments.get("limit")) is not int
+                    or not 1 <= arguments["limit"] <= 2000
+                    or arguments.get("includeMedia", False) is not False))):
+                return CallToolResult(content=[TextContent(type="text", text="tool_denied: Exact WhatsApp worker scope required.")], is_error=True)
         approval_reference = ContentMutationPolicy.normalized_approval_reference(
             _approval_reference(context) or ""
         )
@@ -653,6 +671,9 @@ def _tool_authorization_error(principal: Any, name: str) -> str | None:
     if principal.type == "signal_worker":
         operation = SIGNAL_WORKER_TOOLS.get(name)
         return None if operation in principal.signal_operations else "tool_denied"
+    if principal.type == "whatsapp_worker":
+        operation = {"openwa_MessageHistory": "history", "openwa_MessageSendText": "send"}.get(name)
+        return None if operation in principal.whatsapp_operations else "tool_denied"
     if name in N8N_ROUTED_TOOLS:
         return None if principal.allows_provider("n8n") and principal.n8n_tools else "tool_denied"
     if name in MANAGEMENT_ONLY_TOOLS:
