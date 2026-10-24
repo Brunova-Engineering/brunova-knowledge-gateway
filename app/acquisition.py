@@ -322,7 +322,7 @@ def register_acquisition_tools(server: Any) -> None:
             destination_url: Annotated[str, Field(min_length=9, max_length=2000)],
             message_text_hash: Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")],
             evidence_id: Identifier) -> CallToolResult:
-        """Record one bounded observation from a human-operated Brunova browser dispatch. Gateway does not open pages, send messages, or claim provider effects."""
+        """Record one bounded observation from the Brunova browser adapter after its exact send. Panky must not type or click manually; Gateway only records the adapter's observation."""
         for value in (sender_url, destination_url):
             parsed = urlsplit(value)
             if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
@@ -345,7 +345,7 @@ def register_acquisition_tools(server: Any) -> None:
             sender_url: Annotated[str, Field(min_length=9, max_length=2000)],
             destination_url: Annotated[str, Field(min_length=9, max_length=2000)],
             message_text_hash: Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]) -> CallToolResult:
-        """Record an observed Facebook or Instagram reply from a human-operated browser dispatch. Engine verifies the exact confirmed send, thread, profile, evidence and chronology. This does not message anyone or write to CRM."""
+        """Record an observed Facebook or Instagram reply after an adapter-confirmed send. Engine verifies the exact send, thread, profile, evidence and chronology. This read-only observation does not send or write CRM."""
         for value in (sender_url, destination_url):
             parsed = urlsplit(value)
             if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
