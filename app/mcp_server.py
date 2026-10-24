@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -674,6 +675,8 @@ def _tool_authorization_error(principal: Any, name: str) -> str | None:
     if principal.type == "whatsapp_worker":
         operation = {"openwa_MessageHistory": "history", "openwa_MessageSendText": "send"}.get(name)
         return None if operation in principal.whatsapp_operations else "tool_denied"
+    if principal.type == "crm_worker":
+        return None if name == "hubspot_manage_crm_objects" else "tool_denied"
     if name in N8N_ROUTED_TOOLS:
         return None if principal.allows_provider("n8n") and principal.n8n_tools else "tool_denied"
     if name in MANAGEMENT_ONLY_TOOLS:
@@ -2859,12 +2862,78 @@ async def hubspot_manage_crm_objects(
 ) -> HubSpotToolResult:
     """Create or update HubSpot CRM data when mutation intent is explicit."""
 
+    if active_principal().type == "crm_worker" and not _bounded_crm_worker_transition(arguments, explicit_intent):
+        raise ToolError("crm_worker_exact_transition_required")
+    if active_principal().type == "crm_worker":
+        details = await get_hubspot_runtime().mcp_client.call_tool("get_user_details", {})
+        if not _crm_company_write_available(details):
+            raise ToolError("crm_worker_company_write_unavailable")
+
     return await _execute_hubspot_tool(
         ctx=ctx,
         tool_name="manage_crm_objects",
         arguments=arguments,
         explicit_intent=explicit_intent,
     )
+
+
+def _bounded_crm_worker_transition(arguments: dict[str, Any], explicit_intent: bool) -> bool:
+    """Reject every worker mutation except the two C.7 company transitions."""
+    if not explicit_intent or not isinstance(arguments, dict) or arguments.get("confirmationStatus") != "CONFIRMED":
+        return False
+    create = "createRequest" in arguments
+    request_key = "createRequest" if create else "updateRequest"
+    if set(arguments) != {"confirmationStatus", request_key}:
+        return False
+    request = arguments.get(request_key)
+    if not isinstance(request, dict) or set(request) != {"objects"} or not isinstance(request["objects"], list) or len(request["objects"]) != 1:
+        return False
+    target = request["objects"][0]
+    if not isinstance(target, dict) or target.get("objectType") != "companies":
+        return False
+    expected_keys = {"objectType", "properties"} if create else {"objectType", "objectId", "properties"}
+    if set(target) != expected_keys:
+        return False
+    properties = target.get("properties")
+    if not isinstance(properties, dict) or any(not isinstance(value, str) for value in properties.values()):
+        return False
+    if properties.get("lifecyclestage") != "salesqualifiedlead":
+        return False
+    if create:
+        domain = properties.get("domain")
+        name = properties.get("name")
+        return (set(properties) == {"domain", "name", "hs_lead_status", "lifecyclestage"}
+                and properties["hs_lead_status"] == "CONNECTED"
+                and isinstance(domain, str) and bool(re.fullmatch(
+                    r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}", domain))
+                and isinstance(name, str) and 2 <= len(name.strip()) <= 200
+                and not any(ord(character) < 32 or ord(character) == 127 for character in name))
+    return (set(properties) == {"hs_lead_status", "lifecyclestage"}
+            and properties["hs_lead_status"] in {"IN_PROGRESS", "BAD_TIMING"}
+            and type(target.get("objectId")) is int and 1 <= target["objectId"] <= 9_007_199_254_740_991)
+
+
+def _crm_company_write_available(details: Any) -> bool:
+    """Require current HubSpot COMPANY write availability before a worker mutation."""
+    if not isinstance(details, dict):
+        return False
+    content = details.get("content")
+    if not isinstance(content, list):
+        return False
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "text" or not isinstance(block.get("text"), str):
+            continue
+        try:
+            body = json.loads(block["text"])
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(body, dict):
+            continue
+        information = body.get("toolInformation")
+        availability = information.get("crmObjectTypeAvailability") if isinstance(information, dict) else None
+        company = availability.get("COMPANY") if isinstance(availability, dict) else None
+        return isinstance(company, dict) and company.get("write") == "AVAILABLE"
+    return False
 
 
 def _csv_environment(name: str, default: str = "") -> list[str]:

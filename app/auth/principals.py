@@ -111,6 +111,25 @@ class WhatsAppWorkerPrincipalRecord(BaseModel):
         return value
 
 
+class CrmWorkerPrincipalRecord(BaseModel):
+    """Acquisition CRM worker: only bounded company status transitions."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    id: str = Field(pattern=r"^[a-z][a-z0-9_]{2,63}$")
+    type: Literal["crm_worker"]
+    status: Literal["active", "revoked"] = "active"
+    token_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    expires_at: datetime | None = None
+
+    @field_validator("expires_at")
+    @classmethod
+    def expiration_must_include_timezone(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("expires_at must include a timezone")
+        return value
+
+
 class SignalWorkerPrincipalRecord(BaseModel):
     """Machine principal limited to one allowlisted Signal extension."""
 
@@ -139,13 +158,13 @@ class PrincipalRegistryDocument(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     version: Literal[1]
-    principals: tuple[DeveloperPrincipalRecord | SignalWorkerPrincipalRecord | WhatsAppWorkerPrincipalRecord, ...]
+    principals: tuple[DeveloperPrincipalRecord | SignalWorkerPrincipalRecord | WhatsAppWorkerPrincipalRecord | CrmWorkerPrincipalRecord, ...]
 
     @field_validator("principals")
     @classmethod
     def principals_must_be_unique(
-        cls, value: tuple[DeveloperPrincipalRecord | SignalWorkerPrincipalRecord | WhatsAppWorkerPrincipalRecord, ...]
-    ) -> tuple[DeveloperPrincipalRecord | SignalWorkerPrincipalRecord | WhatsAppWorkerPrincipalRecord, ...]:
+        cls, value: tuple[DeveloperPrincipalRecord | SignalWorkerPrincipalRecord | WhatsAppWorkerPrincipalRecord | CrmWorkerPrincipalRecord, ...]
+    ) -> tuple[DeveloperPrincipalRecord | SignalWorkerPrincipalRecord | WhatsAppWorkerPrincipalRecord | CrmWorkerPrincipalRecord, ...]:
         if len({item.id for item in value}) != len(value):
             raise ValueError("Principal IDs must be unique")
         if len({item.token_sha256 for item in value}) != len(value):
@@ -156,7 +175,7 @@ class PrincipalRegistryDocument(BaseModel):
 @dataclass(frozen=True, repr=False)
 class Principal:
     id: str
-    type: Literal["management", "developer", "signal_worker", "whatsapp_worker"]
+    type: Literal["management", "developer", "signal_worker", "whatsapp_worker", "crm_worker"]
     status: Literal["active", "revoked"]
     providers: ProviderScope
     sources: frozenset[str] | None
@@ -192,8 +211,18 @@ class Principal:
 
     @classmethod
     def from_record(
-        cls, record: DeveloperPrincipalRecord | SignalWorkerPrincipalRecord | WhatsAppWorkerPrincipalRecord
+        cls, record: DeveloperPrincipalRecord | SignalWorkerPrincipalRecord | WhatsAppWorkerPrincipalRecord | CrmWorkerPrincipalRecord
     ) -> "Principal":
+        if isinstance(record, CrmWorkerPrincipalRecord):
+            return cls(
+                id=record.id,
+                type=record.type,
+                status=record.status,
+                providers=ProviderScope(hubspot=True),
+                sources=frozenset(),
+                capabilities=CapabilityScope(),
+                expires_at=record.expires_at,
+            )
         if isinstance(record, WhatsAppWorkerPrincipalRecord):
             return cls(
                 id=record.id,
@@ -261,7 +290,7 @@ class PrincipalResolver:
     def __init__(
         self,
         management_token: str,
-        records: tuple[DeveloperPrincipalRecord | SignalWorkerPrincipalRecord | WhatsAppWorkerPrincipalRecord, ...],
+        records: tuple[DeveloperPrincipalRecord | SignalWorkerPrincipalRecord | WhatsAppWorkerPrincipalRecord | CrmWorkerPrincipalRecord, ...],
     ):
         self._management_token = management_token
         self._records = records
