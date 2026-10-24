@@ -17,6 +17,13 @@ class FakeOpenWAClient:
     async def list_tools(self, **_kwargs):
         return [
             OpenWAToolDescriptor(
+                name="ContactCheckNumber",
+                description="Resolve a phone number to its canonical chat identity",
+                input_schema={"type": "object", "required": ["sessionId", "number"]},
+                annotations={"readOnlyHint": True},
+                tier="read",
+            ),
+            OpenWAToolDescriptor(
                 name="MessageHistory",
                 description="Read recent messages",
                 input_schema={"type": "object", "required": ["sessionId"]},
@@ -77,7 +84,7 @@ def test_management_projects_and_calls_openwa_write_without_approval(monkeypatch
     assert audits[-1]["provider"] == "openwa"
 
 
-def test_whatsapp_worker_sees_only_two_tools_and_rejects_other_session(monkeypatch):
+def test_whatsapp_worker_resolves_canonical_chat_without_expanding_send_scope(monkeypatch):
     fake = FakeOpenWAClient()
     monkeypatch.setattr(mcp_module, "get_openwa_client", lambda: fake)
     principal = Principal.from_record(WhatsAppWorkerPrincipalRecord.model_validate({
@@ -97,6 +104,18 @@ def test_whatsapp_worker_sees_only_two_tools_and_rejects_other_session(monkeypat
             history = await mcp_module.mcp_server.call_tool("openwa_MessageHistory", {
                 "sessionId": "brunova", "chatId": "5215512345678@c.us", "limit": 50,
             })
+            canonical = await mcp_module.mcp_server.call_tool("openwa_MessageHistory", {
+                "sessionId": "brunova", "chatId": "15965182017662@lid", "limit": 50,
+            })
+            lookup = await mcp_module.mcp_server.call_tool("openwa_ContactCheckNumber", {
+                "sessionId": "brunova", "number": "5215512345678",
+            })
+            wrong_lookup = await mcp_module.mcp_server.call_tool("openwa_ContactCheckNumber", {
+                "sessionId": "another-session", "number": "5215512345678",
+            })
+            broad_lookup = await mcp_module.mcp_server.call_tool("openwa_ContactCheckNumber", {
+                "sessionId": "brunova", "number": "5215512345678", "extra": "unsafe",
+            })
             sent = await mcp_module.mcp_server.call_tool("openwa_MessageSendText", {
                 "sessionId": "brunova", "chatId": "5215512345678@c.us",
                 "text": "This is a sufficiently long exact outbound message.",
@@ -107,16 +126,20 @@ def test_whatsapp_worker_sees_only_two_tools_and_rejects_other_session(monkeypat
                 "media": "unapproved",
             })
             blocked = await mcp_module.mcp_server.call_tool("openwa_ContactList", {})
-            return catalog, denied, history, sent, media, blocked
+            return catalog, denied, history, canonical, lookup, wrong_lookup, broad_lookup, sent, media, blocked
         finally:
             reset_principal(binding)
 
-    catalog, denied, history, sent, media, blocked = asyncio.run(scenario())
-    assert catalog == {"openwa_MessageHistory", "openwa_MessageSendText"}
-    assert denied.is_error and media.is_error and blocked.is_error
-    assert not history.is_error and not sent.is_error
+    catalog, denied, history, canonical, lookup, wrong_lookup, broad_lookup, sent, media, blocked = asyncio.run(scenario())
+    assert catalog == {"openwa_ContactCheckNumber", "openwa_MessageHistory", "openwa_MessageSendText"}
+    assert denied.is_error and wrong_lookup.is_error and broad_lookup.is_error and media.is_error and blocked.is_error
+    assert not history.is_error and not canonical.is_error and not lookup.is_error and not sent.is_error
     assert fake.calls == [("MessageHistory", {
         "sessionId": "brunova", "chatId": "5215512345678@c.us", "limit": 50,
+    }), ("MessageHistory", {
+        "sessionId": "brunova", "chatId": "15965182017662@lid", "limit": 50,
+    }), ("ContactCheckNumber", {
+        "sessionId": "brunova", "number": "5215512345678",
     }), ("MessageSendText", {
         "sessionId": "brunova", "chatId": "5215512345678@c.us",
         "text": "This is a sufficiently long exact outbound message.",

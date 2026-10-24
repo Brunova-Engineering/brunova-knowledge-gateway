@@ -329,7 +329,7 @@ class BrunovaMCPServer(MCPServer):
             except Exception:
                 openwa_tools = []
             for descriptor in openwa_tools:
-                required_operation = {"MessageHistory": "history", "MessageSendText": "send"}.get(descriptor.name)
+                required_operation = {"MessageHistory": "history", "ContactCheckNumber": "history", "MessageSendText": "send"}.get(descriptor.name)
                 if principal.type == "whatsapp_worker" and required_operation not in principal.whatsapp_operations:
                     continue
                 exposed_name = _downstream_exposed_name("openwa", descriptor.name, occupied)
@@ -460,18 +460,25 @@ class BrunovaMCPServer(MCPServer):
         request_id = correlation_id(str(context.request_id) if context else None)
         principal = active_principal()
         if principal.type == "whatsapp_worker":
-            allowed_keys = ({"sessionId", "chatId", "text"} if name == "openwa_MessageSendText"
-                            else {"sessionId", "chatId", "limit", "deep", "includeMedia"})
-            if (arguments.get("sessionId") != principal.whatsapp_session_id
-                or set(arguments) - allowed_keys
-                or not re.fullmatch(r"\d{8,15}@c\.us", str(arguments.get("chatId", "")))
-                or (name == "openwa_MessageSendText" and (
-                    not isinstance(arguments.get("text"), str)
-                    or not 30 <= len(arguments["text"].strip()) <= 4000))
-                or (name == "openwa_MessageHistory" and (
-                    type(arguments.get("limit")) is not int
-                    or not 1 <= arguments["limit"] <= 2000
-                    or arguments.get("includeMedia", False) is not False))):
+            if name == "openwa_ContactCheckNumber":
+                valid = (set(arguments) == {"sessionId", "number"}
+                         and arguments.get("sessionId") == principal.whatsapp_session_id
+                         and re.fullmatch(r"\d{8,15}", str(arguments.get("number", ""))) is not None)
+            else:
+                allowed_keys = ({"sessionId", "chatId", "text"} if name == "openwa_MessageSendText"
+                                else {"sessionId", "chatId", "limit", "deep", "includeMedia"})
+                valid = (arguments.get("sessionId") == principal.whatsapp_session_id
+                         and not set(arguments) - allowed_keys
+                         and re.fullmatch(r"\d{8,15}@c\.us" if name == "openwa_MessageSendText"
+                                          else r"\d{8,20}@(c\.us|lid)", str(arguments.get("chatId", ""))) is not None
+                         and (name != "openwa_MessageSendText" or (
+                             isinstance(arguments.get("text"), str)
+                             and 30 <= len(arguments["text"].strip()) <= 4000))
+                         and (name != "openwa_MessageHistory" or (
+                             type(arguments.get("limit")) is int
+                             and 1 <= arguments["limit"] <= 2000
+                             and arguments.get("includeMedia", False) is False)))
+            if not valid:
                 return CallToolResult(content=[TextContent(type="text", text="tool_denied: Exact WhatsApp worker scope required.")], is_error=True)
         approval_reference = ContentMutationPolicy.normalized_approval_reference(
             _approval_reference(context) or ""
@@ -673,7 +680,7 @@ def _tool_authorization_error(principal: Any, name: str) -> str | None:
         operation = SIGNAL_WORKER_TOOLS.get(name)
         return None if operation in principal.signal_operations else "tool_denied"
     if principal.type == "whatsapp_worker":
-        operation = {"openwa_MessageHistory": "history", "openwa_MessageSendText": "send"}.get(name)
+        operation = {"openwa_MessageHistory": "history", "openwa_ContactCheckNumber": "history", "openwa_MessageSendText": "send"}.get(name)
         return None if operation in principal.whatsapp_operations else "tool_denied"
     if principal.type == "crm_worker":
         return None if name == "hubspot_manage_crm_objects" else "tool_denied"
