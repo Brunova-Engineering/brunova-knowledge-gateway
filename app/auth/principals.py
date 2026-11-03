@@ -156,7 +156,7 @@ class PrincipalRegistryDocument(BaseModel):
 @dataclass(frozen=True, repr=False)
 class Principal:
     id: str
-    type: Literal["management", "developer", "signal_worker", "whatsapp_worker"]
+    type: Literal["management", "developer", "signal_worker", "whatsapp_worker", "panky"]
     status: Literal["active", "revoked"]
     providers: ProviderScope
     sources: frozenset[str] | None
@@ -167,6 +167,23 @@ class Principal:
     whatsapp_session_id: str | None = None
     whatsapp_operations: frozenset[str] = frozenset()
     expires_at: datetime | None = None
+    oidc_subject: str | None = None
+    oidc_email: str | None = None
+
+    @classmethod
+    def panky(cls, *, subject: str, email: str) -> "Principal":
+        # Discovery is broad; every action is checked against current policy.
+        return cls(
+            id="panky:" + hashlib.sha256(subject.encode()).hexdigest()[:16],
+            type="panky", status="active",
+            providers=ProviderScope(workspace=True, hubspot=True, n8n=True, openwa=True),
+            sources=None,
+            capabilities=CapabilityScope(
+                read=True, create=True, update=True, move=True,
+                delete=True, share=True, convert=True,
+            ),
+            oidc_subject=subject, oidc_email=email,
+        )
 
     @classmethod
     def management(cls) -> "Principal":
@@ -240,12 +257,12 @@ class Principal:
 
     def allows_n8n_instance(self, instance_id: str) -> bool:
         return self.allows_provider("n8n") and (
-            self.type == "management" or instance_id in (self.n8n_tools or {})
+            self.type in {"management", "panky"} or instance_id in (self.n8n_tools or {})
         )
 
     def allows_n8n_tool(self, instance_id: str, tool_name: str) -> bool:
         return self.allows_n8n_instance(instance_id) and (
-            self.type == "management"
+            self.type in {"management", "panky"}
             or tool_name in (self.n8n_tools or {}).get(instance_id, frozenset())
             or "*" in (self.n8n_tools or {}).get(instance_id, frozenset())
         )

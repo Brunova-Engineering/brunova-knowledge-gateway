@@ -11,6 +11,7 @@ import os
 from dataclasses import dataclass
 
 from app.auth.principals import Principal, PrincipalResolver
+from app.auth.panky_bridge import PankyBridgeError, bridge_mode, verify_access_token
 
 GATEWAY_TOKEN_ENVIRONMENT_VARIABLE = "BRUNOVA_GATEWAY_TOKEN"
 
@@ -65,4 +66,12 @@ class GatewayPrincipalAuthenticator:
     def authenticate(
         self, authorization: str | None
     ) -> tuple[Principal | None, str | None]:
+        if bridge_mode() != "off" and authorization:
+            scheme, separator, token = authorization.partition(" ")
+            if separator and scheme.casefold() == "bearer" and token.count(".") == 2:
+                try:
+                    identity = verify_access_token(token)
+                except PankyBridgeError:
+                    return None, "invalid_authentication"
+                return Principal.panky(subject=identity.subject, email=identity.email), None
         return self._resolver.resolve(authorization)

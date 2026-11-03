@@ -49,6 +49,12 @@ from app.source_registry import SourceRegistry, SourceRegistryMetadata
 from app.auth.pubsub_push import parse_pubsub_signal, verify_pubsub_oidc
 from app.agent_signals import AgentSignalInbox
 from app.runtime import get_runtime_gateway
+from app.auth.panky_bridge import PankyBridgeError, issue_access_token
+from pydantic import BaseModel
+
+
+class PankyTokenExchange(BaseModel):
+    google_id_token: str
 
 
 @asynccontextmanager
@@ -63,6 +69,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.add_middleware(GatewayAuthenticationMiddleware)
+
+
+@app.post("/auth/panky/exchange")
+def exchange_panky_token(request: PankyTokenExchange):
+    try:
+        token, lifetime = issue_access_token(request.google_id_token)
+    except PankyBridgeError:
+        raise HTTPException(401, "Google identity proof is not accepted") from None
+    return {"access_token": token, "token_type": "Bearer", "expires_in": lifetime}
 
 
 def _get_valid_settings() -> Settings:

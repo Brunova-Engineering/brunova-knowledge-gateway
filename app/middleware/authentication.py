@@ -25,6 +25,8 @@ PUBLIC_PATHS = frozenset(
         "/openapi.json",
         "/redoc",
         "/auth/hubspot/callback",
+        # This route verifies a Google OIDC proof before issuing a short bearer.
+        "/auth/panky/exchange",
         # This route performs dedicated Google OIDC authentication in-app.
         "/events/agent-signals",
     }
@@ -123,6 +125,14 @@ class GatewayAuthenticationMiddleware:
                     source_id=denied_source_id,
                 )
                 return
+        elif principal.type == "panky" and not request.url.path.startswith("/mcp"):
+            await self._reject(
+                scope=scope, receive=receive, send=send,
+                request_id=request_id, consumer=consumer,
+                error_code="tool_denied", status_code=403,
+                principal_id=principal.id, principal_type=principal.type,
+            )
+            return
         elif principal.type == "signal_worker" and not request.url.path.startswith("/mcp"):
             await self._reject(
                 scope=scope,
