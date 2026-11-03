@@ -68,6 +68,27 @@ def test_expired_token_is_denied(monkeypatch):
         verify_access_token(f"{header}.{body}.{panky_bridge._sign(header, body)}")
 
 
+def test_short_token_remains_valid_after_first_five_seconds(monkeypatch):
+    from app.auth import panky_bridge
+
+    monkeypatch.setenv("PANKY_POLICY_MODE", "shadow")
+    monkeypatch.setenv("PANKY_GATEWAY_SIGNING_KEY", "x" * 40)
+    monkeypatch.setenv("PANKY_DESKTOP_OAUTH_CLIENT_ID", "fixture-client")
+    monkeypatch.setattr("app.auth.panky_bridge.id_token.verify_oauth2_token",
+                        lambda proof, request, audience: {
+                            "iss": "https://accounts.google.com",
+                            "aud": audience, "sub": "google-subject",
+                            "email": "dev@example.com", "email_verified": True,
+                        })
+    monkeypatch.setattr(panky_bridge.time, "time", lambda: 1000)
+    token, _ = issue_access_token("verified-fixture-proof")
+    monkeypatch.setattr(panky_bridge.time, "time", lambda: 1010)
+    assert verify_access_token(token).subject == "google-subject"
+    monkeypatch.setattr(panky_bridge.time, "time", lambda: 1300)
+    with pytest.raises(PankyBridgeError):
+        verify_access_token(token)
+
+
 def test_policy_denial_stops_tool_before_external_effect(monkeypatch):
     calls = []
 

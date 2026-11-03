@@ -96,11 +96,15 @@ def verify_access_token(token: str) -> PankyIdentity:
         metadata = json.loads(_unb64(header))
         claims = json.loads(_unb64(payload))
         now = int(time.time())
+        issued = claims.get("iat")
+        expires = claims.get("exp")
         if (metadata != {"alg": "HS256", "typ": "JWT"}
                 or claims.get("iss") != "brunova-knowledge-gateway"
                 or claims.get("aud") != "brunova-knowledge-gateway/mcp"
-                or not now - 5 <= claims.get("iat", 0) <= now
-                or not now < claims.get("exp", 0) <= now + 305
+                or not isinstance(issued, int) or isinstance(issued, bool)
+                or not isinstance(expires, int) or isinstance(expires, bool)
+                or not now - 300 <= issued <= now + 5
+                or not now < expires <= issued + 300
                 or claims.get("oidc_issuer") != "https://accounts.google.com"
                 or not isinstance(claims.get("sub"), str)
                 or not isinstance(claims.get("email"), str)
