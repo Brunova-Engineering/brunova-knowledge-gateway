@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from app.auth.principals import (
     CapabilityScope,
+    CrmWorkerPrincipalRecord,
     DeveloperPrincipalRecord,
     Principal,
     PrincipalResolver,
@@ -111,6 +112,19 @@ def test_resolver_supports_one_session_whatsapp_worker():
     assert principal.whatsapp_session_id == "brunova"
     assert principal.whatsapp_operations == frozenset({"history", "send"})
     assert principal.providers == ProviderScope(openwa=True)
+    assert token not in repr(principal)
+
+
+def test_resolver_supports_bounded_crm_worker():
+    token = "crm-worker-token-with-at-least-256-bits-of-randomness"
+    record = CrmWorkerPrincipalRecord.model_validate({
+        "id": "acquisition_crm_worker", "type": "crm_worker",
+        "token_sha256": hashlib.sha256(token.encode()).hexdigest(),
+    })
+    principal, error = PrincipalResolver("management-token", (record,)).resolve(f"Bearer {token}")
+    assert error is None
+    assert principal.type == "crm_worker"
+    assert principal.providers == ProviderScope(hubspot=True)
     assert token not in repr(principal)
 
 

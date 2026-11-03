@@ -10,6 +10,8 @@ Management-only browser-dispatch tools read one Engine-owned contact checkpoint,
 
 A dedicated `whatsapp_worker` principal may project only OpenWA text send and message history for one configured session. It is separate from Management and the Agent Signal worker; the Engine must check its exact contact grant before using the delegated Gateway token.
 
+A separate `crm_worker` principal exposes only one bounded HubSpot company transition tool. It cannot use generic CRM reads or edit contacts, deals or arbitrary properties. The Engine owns the one-use checkpoint and readback; Gateway owns the HubSpot credential and executes the narrow mutation.
+
 A separate read-only Management tool lists bounded Facebook and Instagram reply-review targets derived from confirmed Engine sends. The Portal Backend delegates that projection to Engine-owned SQL, returning the latest confirmed intent per destination. A target identifies a thread to inspect; it is never evidence of a reply or permission to send.
 
 ## Evidence

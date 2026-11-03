@@ -920,6 +920,15 @@ responsabilidad de validar el permiso exacto del intento antes de invocar al
 Gateway. El token de este trabajador se guarda en el llavero de la Mac como
 `brunova-acquisition-whatsapp-worker`, nunca en Git ni en el registro JSON.
 
+Para las transiciones de empresa en HubSpot, una identidad distinta `crm_worker`
+expone únicamente `hubspot_manage_crm_objects`. El Gateway acepta solo una
+empresa por operación y las transiciones C.7 `CONNECTED`/calificada o
+`IN_PROGRESS`/`BAD_TIMING` sobre una empresa ya calificada. La comprobación
+previa, el checkpoint de un solo uso y la lectura posterior siguen en el Engine.
+La credencial del trabajador se guarda en el llavero bajo
+`brunova-acquisition-crm-worker`; la credencial de HubSpot permanece en el
+Gateway y no se copia al trabajador.
+
 El token individual debe generarse con un CSPRNG, guardarse en un secreto
 separado accesible al operador y al developer previsto, y convertirse a hash
 antes de crear el registro. No se imprime durante deploy ni se guarda en Git,
