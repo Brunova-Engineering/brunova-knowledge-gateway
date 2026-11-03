@@ -16,7 +16,6 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/opt/panky-policy/core
 UMask=0077
 
 [Install]

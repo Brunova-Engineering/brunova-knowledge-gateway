@@ -164,29 +164,6 @@ def complete_policy_use(reservation_id: str, request_id: str, status: str) -> No
         raise PankyBridgeError("Policy use completion is unavailable") from None
 
 
-def activate_policy_release(identity: PankyIdentity, core_commit: str) -> dict:
-    base = os.getenv("PANKY_POLICY_BACKEND_URL", "")
-    if not base.startswith("https://"):
-        raise PankyBridgeError("Policy backend URL is unavailable")
-    try:
-        workload_token = id_token.fetch_id_token(GoogleRequest(), base)
-        response = httpx.post(
-            f"{base.rstrip('/')}/v1/releases/activate",
-            headers={"Authorization": f"Bearer {workload_token}"},
-            json={"actor": {"issuer": identity.issuer,
-                            "subject": identity.subject, "email": identity.email},
-                  "core_commit": core_commit},
-            timeout=40,
-        )
-        response.raise_for_status()
-        result = response.json()
-        if not isinstance(result.get("core_commit"), str):
-            raise ValueError("invalid activation response")
-        return result
-    except (httpx.HTTPError, ValueError):
-        raise PankyBridgeError("Policy activation is unavailable") from None
-
-
 def preview_policy_decisions(requests: list[dict]) -> list[dict]:
     base = os.getenv("PANKY_POLICY_BACKEND_URL", "")
     if not base.startswith("https://"):

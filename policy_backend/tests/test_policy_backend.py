@@ -218,3 +218,46 @@ def test_private_api_requires_gateway_identity(database, monkeypatch):
         assert response.json()["reason"] == "default_deny"
     finally:
         policy_app.dependency_overrides.clear()
+
+
+def test_core_workflow_publishes_only_its_exact_main_commit(database, monkeypatch):
+    from policy_backend.app import github_jwks
+
+    commit = "e" * 40
+    registry_yaml = yaml.safe_dump({"actors": {
+        "admin": {"status": "active", "roles": ["super_admin"],
+                  "identities": {"google_oidc": {"email": "admin@example.com"}}},
+        "dev": {"status": "active", "roles": ["developer"],
+                "identities": {"google_oidc": {"email": "dev@example.com"}}},
+    }})
+    document = {"schema_version": 1, "tenant": "brunova",
+                "actors": [{"actor_id": "admin"}, {"actor_id": "dev"}],
+                "grants": []}
+    claims = {
+        "repository_id": "1391259854",
+        "repository": "Pancracio-s/pancracio-core",
+        "ref": "refs/heads/main", "event_name": "push",
+        "workflow_ref": "Pancracio-s/pancracio-core/.github/workflows/publish-gateway-policy.yml@refs/heads/main",
+        "sha": commit,
+    }
+    monkeypatch.setattr("policy_backend.app.github_jwks", lambda: type(
+        "Keys", (), {"get_signing_key_from_jwt": lambda self, token: type(
+            "Key", (), {"key": "synthetic-key"})()})())
+    monkeypatch.setattr("policy_backend.app.jwt.decode",
+                        lambda *args, **kwargs: claims)
+    policy_app.dependency_overrides[store_dependency] = lambda: PolicyStore(database)
+    try:
+        client = TestClient(policy_app)
+        payload = {"core_commit": commit, "policy": document,
+                   "registry_yaml": registry_yaml}
+        assert client.post("/v1/releases/publish-from-core", json=payload).status_code == 401
+        denied = client.post("/v1/releases/publish-from-core",
+                             json={**payload, "core_commit": "f" * 40},
+                             headers={"Authorization": "Bearer synthetic-oidc"})
+        assert denied.status_code == 403
+        accepted = client.post("/v1/releases/publish-from-core", json=payload,
+                               headers={"Authorization": "Bearer synthetic-oidc"})
+        assert accepted.status_code == 200
+        assert accepted.json()["core_commit"] == commit
+    finally:
+        policy_app.dependency_overrides.clear()

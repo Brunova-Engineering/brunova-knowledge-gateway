@@ -59,7 +59,7 @@ CREATE TABLE panky_policy_releases (
     core_commit char(40) NOT NULL UNIQUE,
     status text NOT NULL CHECK (status IN ('active', 'superseded')),
     activated_at timestamptz NOT NULL DEFAULT now(),
-    published_by text NOT NULL REFERENCES panky_actors(actor_id)
+    published_by text NOT NULL
 );
 CREATE UNIQUE INDEX panky_one_active_policy_idx ON panky_policy_releases(status)
     WHERE status = 'active';

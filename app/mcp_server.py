@@ -56,7 +56,7 @@ from app.auth.principals import (
     authorize_workspace_operation,
 )
 from app.auth.panky_bridge import (
-    PankyBridgeError, PankyIdentity, activate_policy_release,
+    PankyBridgeError, PankyIdentity,
     complete_policy_use, policy_decision, preview_policy_decisions,
 )
 from app.document_production import (
@@ -840,8 +840,6 @@ def _principal_can_see_tool(
 
 
 def _tool_authorization_error(principal: Any, name: str) -> str | None:
-    if name == "panky_publish_policy":
-        return None if principal.type == "panky" else "tool_denied"
     if principal.type == "panky":
         return None
     if name.startswith("acquisition_"):
@@ -895,27 +893,6 @@ mcp_server = BrunovaMCPServer(
         "by principal scope."
     ),
 )
-
-
-@mcp_server.tool()
-async def panky_publish_policy(core_commit: str, ctx: Context) -> dict[str, str]:
-    """Activate a reviewed Core commit after current-policy super-admin checks."""
-    if not re.fullmatch(r"[0-9a-f]{40}", core_commit):
-        raise ToolError("Full Core commit required")
-    principal = active_principal()
-    if principal.type != "panky" or not principal.oidc_subject or not principal.oidc_email:
-        raise ToolError("OIDC identity required")
-    identity = PankyIdentity(
-        issuer="https://accounts.google.com",
-        subject=principal.oidc_subject, email=principal.oidc_email,
-    )
-    try:
-        result = await asyncio.to_thread(activate_policy_release, identity, core_commit)
-    except PankyBridgeError:
-        raise ToolError("Policy publication is unavailable") from None
-    return {"core_commit": result["core_commit"],
-            "release_id": result["release_id"],
-            "request_id": _mcp_request_id(ctx)}
 
 
 def _reference_codec(runtime: KnowledgeRuntime) -> ArtifactReferenceCodec:

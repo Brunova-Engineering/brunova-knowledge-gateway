@@ -157,10 +157,11 @@ def activate_policy(
     dsn: str, policy: PolicyDocument, registry: dict,
     commit: str, publisher_id: str,
 ) -> str:
-    if publisher_id not in {actor.actor_id for actor in policy.actors}:
-        raise ValueError("Publisher is not in this policy")
-    if "super_admin" not in registry[publisher_id]["roles"]:
-        raise ValueError("Only a Core super admin can publish policy")
+    if publisher_id != "github_actions":
+        if publisher_id not in {actor.actor_id for actor in policy.actors}:
+            raise ValueError("Publisher is not in this policy")
+        if "super_admin" not in registry[publisher_id]["roles"]:
+            raise ValueError("Only a Core super admin can publish policy")
     release_id = str(uuid4())
     with psycopg.connect(dsn) as conn:
         with conn.transaction():
@@ -263,7 +264,7 @@ def activate_policy(
                 "INSERT INTO panky_audit_events "
                 "(release_id, actor_id, event_type, decision, details) "
                 "VALUES (%s,%s,'activate_policy','allow',%s)",
-                (release_id, publisher_id,
+                (release_id, None if publisher_id == "github_actions" else publisher_id,
                  psycopg.types.json.Jsonb({"core_commit": commit})),
             )
     return release_id
