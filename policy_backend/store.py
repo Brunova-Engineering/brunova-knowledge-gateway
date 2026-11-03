@@ -40,12 +40,13 @@ class PolicyStore:
                     return DecisionResponse(
                         allowed=False, reason="actor_unknown", release=release_id
                     )
-                if actor["oidc_subject"] is None:
+                if actor["oidc_subject"] is None and not request.preview:
                     conn.execute(
                         "UPDATE panky_actors SET oidc_subject = %s WHERE actor_id = %s",
                         (request.actor.subject, actor["actor_id"]),
                     )
-                elif actor["oidc_subject"] != request.actor.subject:
+                elif (actor["oidc_subject"] is not None
+                      and actor["oidc_subject"] != request.actor.subject):
                     return DecisionResponse(
                         allowed=False, reason="subject_mismatch", release=release_id
                     )

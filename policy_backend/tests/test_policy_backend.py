@@ -91,6 +91,17 @@ def test_admin_and_unknown_actor(database):
     assert policy.decide(request("admin@example.com", "different")).reason == "subject_mismatch"
 
 
+def test_preview_does_not_enroll_synthetic_subject(database):
+    policy = PolicyStore(database)
+    result = policy.decide(request().model_copy(update={"preview": True}))
+    assert result.reason == "default_deny"
+    with psycopg.connect(database) as conn:
+        subject = conn.execute(
+            "SELECT oidc_subject FROM panky_actors WHERE actor_id='dev'"
+        ).fetchone()[0]
+    assert subject is None
+
+
 def test_specific_grant_and_denial(database):
     with psycopg.connect(database) as conn:
         grant(conn)
