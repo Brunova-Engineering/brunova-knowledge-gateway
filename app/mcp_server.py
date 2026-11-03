@@ -394,8 +394,8 @@ class BrunovaMCPServer(MCPServer):
                 }))
         allowed: set[str] = set()
         try:
-            for start in range(0, len(entries), 100):
-                chunk = entries[start:start + 100]
+            for start in range(0, len(entries), 25):
+                chunk = entries[start:start + 25]
                 decisions = await asyncio.to_thread(
                     preview_policy_decisions,
                     [request for _, request in chunk],
