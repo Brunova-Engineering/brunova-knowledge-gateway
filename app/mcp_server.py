@@ -6,6 +6,8 @@ import json
 import os
 import re
 import time
+import asyncio
+from uuid import uuid4
 from collections.abc import Callable
 from typing import Any, Literal, TypeVar
 
@@ -52,6 +54,10 @@ from app.auth.principals import (
     CapabilityScope,
     active_principal,
     authorize_workspace_operation,
+)
+from app.auth.panky_bridge import (
+    PankyBridgeError, PankyIdentity,
+    complete_policy_use, policy_decision, preview_policy_decisions,
 )
 from app.document_production import (
     ArtifactReference,
@@ -309,8 +315,8 @@ class BrunovaMCPServer(MCPServer):
             )
         ]
         occupied = {tool.name for tool in tools}
-        if principal.type in {"management", "whatsapp_worker"}:
-            if principal.type == "management":
+        if principal.type in {"management", "panky", "whatsapp_worker"}:
+            if principal.type in {"management", "panky"}:
                 try:
                     downstream = await get_n8n_client().list_tools()
                 except Exception:
@@ -346,9 +352,171 @@ class BrunovaMCPServer(MCPServer):
                         "tier": descriptor.tier,
                     },
                 ))
+        if principal.type == "panky":
+            return await self._panky_catalog(tools, principal)
         return tools
 
+    async def _panky_catalog(self, tools: list[MCPTool], principal: Any) -> list[MCPTool]:
+        """Show only tools with a current policy path; failures reveal nothing."""
+        assert principal.oidc_subject and principal.oidc_email
+        actor = {"issuer": "https://accounts.google.com",
+                 "subject": principal.oidc_subject,
+                 "email": principal.oidc_email}
+        try:
+            registry = get_runtime_gateway().registry
+            sources = [source.id for source in registry.sources
+                       if source.status.value == "active"]
+            n8n_instances = list(N8NInstanceRegistry.from_environment().ids())
+        except Exception:
+            return []
+        entries: list[tuple[str, dict]] = []
+        for tool in tools:
+            name = tool.name
+            provider = _tool_provider(name)
+            capability = TOOL_CAPABILITIES.get(name)
+            if provider == "workspace" and capability:
+                targets = [("source", source) for source in sources]
+            elif provider == "n8n":
+                instance_ids = (n8n_instances if name in N8N_ROUTED_TOOLS
+                                else ["brunova"])
+                targets = [("instance", instance) for instance in instance_ids]
+            else:
+                targets = [("tool", name)]
+            for kind, reference in targets:
+                entries.append((name, {
+                    "actor": actor, "provider": provider, "tool": name,
+                    "resource_kind": kind, "resource_ref": reference,
+                    "operation": capability or (
+                        "call" if provider in {"n8n", "hubspot", "openwa"}
+                        else "read"
+                    ),
+                    "request_id": f"catalog:{uuid4()}", "preview": True,
+                }))
+        allowed: set[str] = set()
+        try:
+            for start in range(0, len(entries), 100):
+                chunk = entries[start:start + 100]
+                decisions = await asyncio.to_thread(
+                    preview_policy_decisions,
+                    [request for _, request in chunk],
+                )
+                for (name, _), decision in zip(chunk, decisions):
+                    if (decision["allowed"] and
+                            (name not in MANAGEMENT_ONLY_TOOLS
+                             or decision.get("reason") == "super_admin"
+                             or decision.get("grant_tool") == name)):
+                        allowed.add(name)
+        except PankyBridgeError:
+            return []
+        return [tool for tool in tools if tool.name in allowed]
+
     async def call_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        context: Context | None = None,
+    ) -> CallToolResult:
+        principal = active_principal()
+        if principal.type != "panky":
+            return await self._call_tool_impl(name, arguments, context)
+        assert principal.oidc_subject and principal.oidc_email
+        request_id = correlation_id(str(context.request_id) if context else None)
+        provider = _tool_provider(name)
+        source_id = arguments.get("source_id")
+        artifact_ref = arguments.get("artifact_ref")
+        if (provider == "workspace" and isinstance(artifact_ref, str)
+                and artifact_ref and isinstance(source_id, str) and source_id):
+            resource_kind, resource_ref = "document", artifact_ref
+        elif provider == "workspace" and isinstance(source_id, str) and source_id:
+            resource_kind, resource_ref = "source", source_id
+        elif provider == "n8n":
+            resource_kind = "instance"
+            resource_ref = str(arguments.get("instance_id") or "brunova")
+        elif provider == "openwa":
+            resource_kind = "session"
+            resource_ref = str(arguments.get("sessionId") or "*")
+        else:
+            resource_kind, resource_ref = "tool", name
+        operation = TOOL_CAPABILITIES.get(name) or (
+            "call" if provider in {"n8n", "hubspot", "openwa"} else "read"
+        )
+        policy_tool = (
+            str(arguments.get("tool_name"))
+            if name == "n8n_instance_call_tool" and arguments.get("tool_name")
+            else name
+        )
+        identity = PankyIdentity(
+            issuer="https://accounts.google.com",
+            subject=principal.oidc_subject, email=principal.oidc_email,
+        )
+        reservations: list[tuple[str, str]] = []
+        try:
+            decision = await asyncio.to_thread(
+                policy_decision, identity, provider=provider, tool=policy_tool,
+                resource_kind=resource_kind, resource_ref=resource_ref,
+                operation=operation, request_id=request_id,
+                parent_source=source_id if resource_kind == "document" else None,
+            )
+            if (not decision["allowed"] or
+                    (name in MANAGEMENT_ONLY_TOOLS
+                     and decision.get("reason") != "super_admin"
+                     and decision.get("grant_tool") != name)):
+                return CallToolResult(
+                    content=[TextContent(type="text", text="policy_denied: The requested operation is not authorized.")],
+                    is_error=True,
+                )
+            if decision.get("reservation_id"):
+                reservations.append((decision["reservation_id"], request_id))
+            # A move crosses two sources. Both must be authorized before work.
+            destination = arguments.get("destination_source_id")
+            if provider == "workspace" and isinstance(destination, str) and destination:
+                destination_decision = await asyncio.to_thread(
+                    policy_decision, identity, provider=provider, tool=policy_tool,
+                    resource_kind="source", resource_ref=destination,
+                    operation=operation, request_id=f"{request_id}:destination",
+                )
+                if not destination_decision["allowed"]:
+                    for reservation, use_request in reservations:
+                        await asyncio.to_thread(
+                            complete_policy_use, reservation, use_request, "released"
+                        )
+                    return CallToolResult(
+                        content=[TextContent(type="text", text="policy_denied: Destination is not authorized.")],
+                        is_error=True,
+                    )
+                if destination_decision.get("reservation_id"):
+                    reservations.append((
+                        destination_decision["reservation_id"],
+                        f"{request_id}:destination",
+                    ))
+        except PankyBridgeError:
+            for reservation, use_request in reservations:
+                try:
+                    await asyncio.to_thread(
+                        complete_policy_use, reservation, use_request, "uncertain"
+                    )
+                except PankyBridgeError:
+                    pass
+            return CallToolResult(
+                content=[TextContent(type="text", text="policy_unavailable: Authorization could not be verified.")],
+                is_error=True,
+            )
+        try:
+            result = await self._call_tool_impl(name, arguments, context)
+        except Exception:
+            for reservation, use_request in reservations:
+                await asyncio.to_thread(
+                    complete_policy_use, reservation, use_request, "uncertain"
+                )
+            raise
+        for reservation, use_request in reservations:
+            await asyncio.to_thread(
+                complete_policy_use, reservation, use_request,
+                "uncertain" if result.is_error else "committed",
+            )
+        return result
+
+    async def _call_tool_impl(
         self,
         name: str,
         arguments: dict[str, Any],
@@ -672,6 +840,8 @@ def _principal_can_see_tool(
 
 
 def _tool_authorization_error(principal: Any, name: str) -> str | None:
+    if principal.type == "panky":
+        return None
     if name.startswith("acquisition_"):
         return None if principal.type == "management" and name in ACQUISITION_TOOLS else "tool_denied"
     if principal.type == "management":
@@ -795,11 +965,11 @@ def _execute_tool(
         if source_id:
             source = registered_source(runtime.registry, source_id)
             source_classification = source.classification.value
-            if principal.type == "developer":
+            if principal.type in {"developer", "panky"}:
                 authorize_workspace_operation(
                     principal, capability=capability or "read", source=source
                 )
-            if destination_source_id and principal.type == "developer":
+            if destination_source_id and principal.type in {"developer", "panky"}:
                 destination_source = registered_source(
                     runtime.registry, destination_source_id
                 )
@@ -808,7 +978,7 @@ def _execute_tool(
                     capability=capability or "move",
                     source=destination_source,
                 )
-        elif capability and principal.type == "developer":
+        elif capability and principal.type in {"developer", "panky"}:
             authorize_workspace_operation(principal, capability=capability)
         result = operation(runtime, request_id)
         emit_audit_record(

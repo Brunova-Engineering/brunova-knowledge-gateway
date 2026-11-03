@@ -1,3 +1,4 @@
 -r requirements.txt
+-r policy_backend/requirements.txt
 httpx
 pytest

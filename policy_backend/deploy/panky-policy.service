@@ -1,0 +1,22 @@
+[Unit]
+Description=Panky policy decision service
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=panky_policy
+Group=panky_policy
+WorkingDirectory=/opt/panky-policy/current
+EnvironmentFile=/etc/panky-policy/backend.env
+ExecStart=/opt/panky-policy/current/.venv/bin/uvicorn policy_backend.app:app --host 127.0.0.1 --port 17880
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
