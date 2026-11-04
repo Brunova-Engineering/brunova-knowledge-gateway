@@ -94,7 +94,9 @@ async def portal_request(method: str, path: str, *, params: dict | None = None,
     code = "ACQUISITION_UNAVAILABLE"
     error_reason: str | None = None
     payload: Any = {"code": code}
-    if principal.type != "management":
+    # Panky reaches this consumer only after the exact Core policy decision in
+    # MCPServer.call_tool. Keep developer and worker principals outside it.
+    if principal.type not in {"management", "panky"}:
         status, code = 403, "ACQUISITION_CAPABILITY_DENIED"
         payload = {"code": code}
     else:

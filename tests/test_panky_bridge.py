@@ -144,3 +144,51 @@ def test_catalog_hides_ungranted_tools(monkeypatch):
     principal = Principal.panky(subject="fixture-sub", email="dev@example.com")
     visible = asyncio.run(mcp_server._panky_catalog(tools, principal))
     assert [tool.name for tool in visible] == ["retrieve_document"]
+
+
+def test_policy_allowed_panky_can_read_acquisition_without_widening_developer(monkeypatch):
+    import httpx
+    from app import acquisition
+
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, json={"cycleId": "cycle-1", "status": "ACTIVE"})
+
+    monkeypatch.setenv("ACQUISITION_PORTAL_ORIGIN", "https://portal.example.test")
+    monkeypatch.setenv("ACQUISITION_PORTAL_SERVICE_TOKEN", "synthetic_service_token_not_a_real_secret_123456789")
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(acquisition.httpx, "AsyncClient",
+                        lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs))
+    monkeypatch.setattr("app.mcp_server.policy_decision",
+                        lambda *args, **kwargs: {"allowed": True, "reason": "super_admin"})
+
+    binding = bind_principal(Principal.panky(subject="fixture-sub", email="jorge@example.com"))
+    try:
+        result = asyncio.run(mcp_server.call_tool("acquisition_get_cycle", {"cycle_id": "cycle-1"}))
+    finally:
+        reset_principal(binding)
+    assert not result.is_error
+    assert json.loads(result.content[0].text)["data"]["cycleId"] == "cycle-1"
+    assert len(calls) == 1
+    assert calls[0].url.path == "/api/acquisition/v1/cycles/cycle-1"
+
+    monkeypatch.setattr("app.mcp_server.policy_decision",
+                        lambda *args, **kwargs: {"allowed": False, "reason": "default_deny"})
+    binding = bind_principal(Principal.panky(subject="fixture-sub", email="jorge@example.com"))
+    try:
+        policy_denied = asyncio.run(mcp_server.call_tool("acquisition_get_cycle", {"cycle_id": "cycle-1"}))
+    finally:
+        reset_principal(binding)
+    assert policy_denied.is_error
+    assert len(calls) == 1
+
+    from dataclasses import replace
+    binding = bind_principal(replace(Principal.management(), type="developer"))
+    try:
+        denied = asyncio.run(mcp_server.call_tool("acquisition_get_cycle", {"cycle_id": "cycle-1"}))
+    finally:
+        reset_principal(binding)
+    assert denied.is_error
+    assert len(calls) == 1
