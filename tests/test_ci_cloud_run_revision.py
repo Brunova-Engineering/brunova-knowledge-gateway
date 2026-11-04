@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sys
 
 import pytest
@@ -42,6 +43,38 @@ def test_revision_rejects_mismatched_resolved_digest(tmp_path, monkeypatch):
                                      "--resolved-digest", "sha256:" + "c" * 64,
                                      "--expected-revision", "gateway-00157"])
     with pytest.raises(SystemExit, match="expected commit image digest"):
+        deployment.main()
+
+
+def test_ready_revision_matches_platform_image_in_index(tmp_path, monkeypatch):
+    image = "us-central1-docker.pkg.dev/project/repo/gateway:" + "a" * 40
+    runnable = "sha256:" + "b" * 64
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": [
+            {"digest": runnable, "platform": {"os": "linux", "architecture": "amd64"}},
+            {"digest": "sha256:" + "c" * 64,
+             "platform": {"os": "unknown", "architecture": "unknown"}},
+        ],
+    }), encoding="utf-8")
+    index_digest = "sha256:" + hashlib.sha256(manifest.read_bytes()).hexdigest()
+    resolved = deployment.resolved_image(image, runnable)
+    revision = tmp_path / "revision.json"
+    revision.write_text(json.dumps({
+        "metadata": {"name": "gateway-00157"},
+        "spec": {"containers": [{"image": resolved}]},
+        "status": {"imageDigest": resolved,
+                   "conditions": [{"type": "Ready", "status": "True"}]},
+    }), encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["verify", "--revision", str(revision),
+                                     "--image", image, "--resolved-digest", index_digest,
+                                     "--manifest", str(manifest),
+                                     "--expected-revision", "gateway-00157"])
+    assert deployment.main() == 0
+
+    manifest.write_bytes(manifest.read_bytes() + b" ")
+    with pytest.raises(SystemExit, match="registry manifest does not match"):
         deployment.main()
 
 

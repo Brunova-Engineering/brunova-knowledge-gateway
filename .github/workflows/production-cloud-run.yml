@@ -186,10 +186,13 @@ jobs:
             "${{ steps.image.outputs.image }}" \
             --project="$GCP_PROJECT_ID" \
             --format='value(image_summary.digest)')"
+          docker buildx imagetools inspect "${{ steps.image.outputs.image }}" --raw \
+            > "$RUNNER_TEMP/cloud-run-image-manifest.json"
           python scripts/verify_cloud_run_deployment.py \
             --revision "$RUNNER_TEMP/cloud-run-revision.json" \
             --image "${{ steps.image.outputs.image }}" \
             --resolved-digest "$digest" \
+            --manifest "$RUNNER_TEMP/cloud-run-image-manifest.json" \
             --expected-revision "$revision"
 
       - name: Mint Cloud Run invocation identity token
