@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -52,6 +53,21 @@ def resolved_image(commit_image: str, digest: str) -> str:
     return f"{repository}@{digest}"
 
 
+def runnable_digest(manifest_path: str, registry_digest: str) -> str:
+    raw = Path(manifest_path).read_bytes()
+    if "sha256:" + hashlib.sha256(raw).hexdigest() != registry_digest:
+        raise SystemExit("The registry manifest does not match the commit image digest.")
+    manifest = json.loads(raw)
+    if manifest.get("mediaType") == "application/vnd.oci.image.index.v1+json":
+        runnable = [entry for entry in manifest.get("manifests", [])
+                    if entry.get("platform", {}).get("os") == "linux"
+                    and entry.get("platform", {}).get("architecture") == "amd64"]
+        if len(runnable) != 1:
+            raise SystemExit("Expected exactly one linux/amd64 image in the commit image index.")
+        return runnable[0]["digest"]
+    return registry_digest
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--before")
@@ -59,6 +75,7 @@ def main() -> int:
     parser.add_argument("--revision")
     parser.add_argument("--image")
     parser.add_argument("--resolved-digest")
+    parser.add_argument("--manifest")
     parser.add_argument("--tag")
     parser.add_argument("--expected-revision")
     parser.add_argument("--github-output")
@@ -167,7 +184,8 @@ def main() -> int:
             raise SystemExit("Cloud Run returned an unexpected revision name.")
         if not ready(revision):
             raise SystemExit("The deployed Cloud Run revision is not ready.")
-        expected = resolved_image(args.image, args.resolved_digest)
+        image_digest = runnable_digest(args.manifest, args.resolved_digest) if args.manifest else args.resolved_digest
+        expected = resolved_image(args.image, image_digest)
         if not containers or containers[0].get("image") != expected or revision.get("status", {}).get("imageDigest") != expected:
             raise SystemExit("The deployed revision does not reference the expected commit image digest.")
         print(f"Verified ready Cloud Run revision {revision_name}.")
