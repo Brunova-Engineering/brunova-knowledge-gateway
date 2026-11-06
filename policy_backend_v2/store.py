@@ -42,6 +42,66 @@ class PolicyStoreV2:
             ).fetchone()
             return row[0] if row else None
 
+    def context_catalog(self, *, issuer: str, subject: str, email: str) -> dict:
+        """Return one release-consistent, actor-scoped map of context repos."""
+        if issuer != "https://accounts.google.com" or not subject or not email:
+            return {"status": "denied", "reason": "invalid_identity"}
+        with psycopg.connect(self.dsn, row_factory=dict_row, connect_timeout=3) as conn:
+            with conn.transaction():
+                conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                release = conn.execute(
+                    "SELECT release_id,core_commit FROM panky_policy_releases WHERE status='active'"
+                ).fetchone()
+                if release is None:
+                    return {"status": "denied", "reason": "policy_unavailable"}
+                actor = conn.execute(
+                    "SELECT actor_id,oidc_subject,status FROM panky_actors "
+                    "WHERE oidc_issuer=%s AND email=%s FOR UPDATE",
+                    (issuer, email.casefold()),
+                ).fetchone()
+                if actor is None or actor["status"] != "active":
+                    return {"status": "denied", "reason": "actor_unknown"}
+                if actor["oidc_subject"] is not None and actor["oidc_subject"] != subject:
+                    return {"status": "denied", "reason": "subject_mismatch"}
+                if actor["oidc_subject"] is None:
+                    conn.execute("UPDATE panky_actors SET oidc_subject=%s WHERE actor_id=%s",
+                                 (subject, actor["actor_id"]))
+                data = self._snapshot(conn, str(release["release_id"]))
+                nodes = []
+                for row in sorted(data["context_nodes"], key=lambda item: item["node_id"]):
+                    if row["lifecycle"] != "active":
+                        continue
+                    readable = tuple(surface for surface in ("knowledge", "state", "work")
+                                     if decide(data, Request(actor["actor_id"], "context_node",
+                                                             row["node_id"], "read", surface)).allowed)
+                    if "knowledge" not in readable:
+                        continue
+                    # A downward publication is the readable backing for a
+                    # Seat that cannot mutate the department's durable node.
+                    # Never hand both Git repositories to a read-only Actor.
+                    can_update = decide(data, Request(actor["actor_id"], "context_node",
+                                                      row["node_id"], "update", "knowledge")).allowed
+                    use_delivery = bool(row["delivery_repository"] and not can_update)
+                    # The durable Git checkout includes all three surfaces.
+                    # A narrower read grant cannot authorize cloning it.
+                    if not use_delivery and len(readable) != 3:
+                        continue
+                    prefix = "delivery_" if use_delivery else ""
+                    if not all(row.get(f"{prefix}{key}") for key in
+                               ("repository", "store_id", "generation", "local_path")):
+                        raise ValueError("Active context repository projection is incomplete")
+                    nodes.append({
+                        "node_id": row["node_id"], "parent_node_id": row["parent_node_id"],
+                        "kind": row["kind"], "repository": row[f"{prefix}repository"],
+                        "store_id": row[f"{prefix}store_id"],
+                        "generation": row[f"{prefix}generation"],
+                        "local_path": row[f"{prefix}local_path"],
+                        "binding_mode": "generated" if use_delivery else "authoritative",
+                        "read_surfaces": ("knowledge",) if use_delivery else readable,
+                    })
+                return {"status": "ready", "actor_id": actor["actor_id"],
+                        "release": release["core_commit"], "nodes": nodes}
+
     def _snapshot(self, conn, release_id: str) -> dict:
         data = {name: list(conn.execute(f"SELECT * FROM {table}"))
                 for name, table in TABLES.items()}

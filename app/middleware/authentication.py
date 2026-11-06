@@ -125,7 +125,10 @@ class GatewayAuthenticationMiddleware:
                     source_id=denied_source_id,
                 )
                 return
-        elif principal.type == "panky" and not request.url.path.startswith("/mcp"):
+        elif principal.type == "panky" and not (
+            request.url.path.startswith("/mcp")
+            or request.url.path == "/panky/context/catalog"
+        ):
             await self._reject(
                 scope=scope, receive=receive, send=send,
                 request_id=request_id, consumer=consumer,

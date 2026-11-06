@@ -161,6 +161,16 @@ def decide_context(item: ContextRequest, _: None = Depends(require_gateway),
         raise HTTPException(503, "Policy decision is unavailable") from None
 
 
+@app.post("/v2/context/catalog")
+def context_catalog(item: ActorProof, _: None = Depends(require_gateway),
+                    database: PolicyStoreV2 = Depends(store)) -> dict:
+    try:
+        return database.context_catalog(issuer=item.issuer, subject=item.subject,
+                                        email=item.email)
+    except Exception:
+        raise HTTPException(503, "Context catalog is unavailable") from None
+
+
 @app.post("/v2/uses/complete")
 def complete_use(item: Completion, _: None = Depends(require_gateway),
                  database: PolicyStoreV2 = Depends(store)) -> dict:

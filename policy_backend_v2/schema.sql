@@ -19,6 +19,18 @@ CREATE TABLE panky_context_nodes (
   kind text NOT NULL CHECK (kind IN ('department','seat','subcontext')),
   visibility text NOT NULL CHECK (visibility IN ('inherit','restricted','owner')),
   lifecycle text NOT NULL CHECK (lifecycle IN ('active','archived')),
+  repository text NOT NULL UNIQUE,
+  store_id text NOT NULL UNIQUE,
+  generation integer NOT NULL CHECK (generation > 0),
+  local_path text NOT NULL UNIQUE,
+  delivery_repository text UNIQUE,
+  delivery_store_id text UNIQUE,
+  delivery_generation integer CHECK (delivery_generation > 0),
+  delivery_local_path text UNIQUE,
+  CHECK ((delivery_repository IS NULL AND delivery_store_id IS NULL
+          AND delivery_generation IS NULL AND delivery_local_path IS NULL)
+      OR (delivery_repository IS NOT NULL AND delivery_store_id IS NOT NULL
+          AND delivery_generation IS NOT NULL AND delivery_local_path IS NOT NULL)),
   CHECK (node_id <> parent_node_id)
 );
 

@@ -265,3 +265,65 @@ def test_v2_enforce_routes_oidc_decision_catalog_and_completion(monkeypatch):
         "https://policy.example.invalid/v2/uses/complete",
     ]
     assert isinstance(calls[1][1], list)
+
+
+def test_context_catalog_requires_v2_and_forwards_verified_actor(monkeypatch):
+    from app.auth import panky_bridge
+
+    identity = PankyIdentity("https://accounts.google.com", "synthetic-sub",
+                             "dev@example.invalid")
+    monkeypatch.setenv("PANKY_POLICY_BACKEND_URL", "https://policy.example.invalid")
+    monkeypatch.setenv("PANKY_POLICY_V2_MODE", "shadow")
+    with pytest.raises(PankyBridgeError):
+        panky_bridge.context_catalog(identity)
+    monkeypatch.setenv("PANKY_POLICY_V2_MODE", "enforce")
+    monkeypatch.setattr(panky_bridge.id_token, "fetch_id_token",
+                        lambda request, audience: "synthetic-service-proof")
+    calls = []
+
+    def reply(url, **kwargs):
+        calls.append((url, kwargs))
+        return SimpleNamespace(raise_for_status=lambda: None,
+                               json=lambda: {"status": "ready", "release": "a" * 40,
+                                             "nodes": []})
+
+    monkeypatch.setattr(panky_bridge.httpx, "post", reply)
+    result = panky_bridge.context_catalog(identity)
+    assert result["status"] == "ready"
+    assert calls[0][0] == "https://policy.example.invalid/v2/context/catalog"
+    assert calls[0][1]["json"] == {"issuer": identity.issuer,
+                                    "subject": identity.subject, "email": identity.email}
+
+
+def test_gateway_catalog_rejects_legacy_token_and_scopes_oidc_actor(
+    monkeypatch, ephemeral_gateway_token,
+):
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    monkeypatch.setenv("PANKY_POLICY_MODE", "shadow")
+    monkeypatch.setenv("PANKY_GATEWAY_SIGNING_KEY", "x" * 40)
+    monkeypatch.setenv("PANKY_DESKTOP_OAUTH_CLIENT_ID", "fixture-client")
+    monkeypatch.setattr("app.auth.panky_bridge.id_token.verify_oauth2_token",
+                        lambda proof, request, audience: {
+                            "iss": "https://accounts.google.com", "aud": audience,
+                            "sub": "google-subject", "email": "dev@example.invalid",
+                            "email_verified": True,
+                        })
+    calls = []
+
+    def catalog(identity):
+        calls.append(identity)
+        return {"status": "ready", "release": "a" * 40, "nodes": []}
+
+    monkeypatch.setattr("app.main.context_catalog", catalog)
+    bearer, _ = issue_access_token("verified-fixture-proof")
+    client = TestClient(app)
+    denied = client.get("/panky/context/catalog",
+                        headers={"Authorization": f"Bearer {ephemeral_gateway_token}"})
+    allowed = client.get("/panky/context/catalog",
+                         headers={"Authorization": f"Bearer {bearer}"})
+    assert denied.status_code == 403
+    assert allowed.status_code == 200
+    assert allowed.json()["status"] == "ready"
+    assert len(calls) == 1 and calls[0].subject == "google-subject"
