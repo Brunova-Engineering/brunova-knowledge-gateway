@@ -175,3 +175,22 @@ def test_http_contract_ignores_preview_flag_on_real_action(db):
         assert client.get("/v2/health").json() == {"status": "ready", "model": "2.0"}
     finally:
         app.dependency_overrides.clear()
+
+
+def test_resource_code_rename_keeps_historical_grants_without_duplicate_ref(db):
+    from policy_backend_v2.publication import stable
+
+    policy, registry, topology = example()
+    activate(db, policy, registry, topology, "d" * 40)
+    renamed = policy.model_copy(deep=True)
+    old = next(r for r in renamed.resources if r.code == "finance_drive")
+    old.code = "finance_drive_v2"
+    activate(db, renamed, registry, topology, "e" * 40)
+    with psycopg.connect(db) as conn:
+        rows = conn.execute(
+            "SELECT resource_id,status FROM panky_resources WHERE external_ref='finance_drive'"
+        ).fetchall()
+    assert set(rows) == {
+        (stable("resource", "finance_drive"), "disabled"),
+        (stable("resource", "finance_drive_v2"), "active"),
+    }

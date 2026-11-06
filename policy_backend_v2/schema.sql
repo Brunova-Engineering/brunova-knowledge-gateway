@@ -74,9 +74,11 @@ CREATE TABLE panky_resources (
   tool_id uuid NOT NULL REFERENCES panky_tools(tool_id),
   resource_kind text NOT NULL,
   external_ref text NOT NULL,
-  status text NOT NULL CHECK (status IN ('active','disabled')),
-  UNIQUE (tool_id, resource_kind, external_ref)
+  status text NOT NULL CHECK (status IN ('active','disabled'))
 );
+CREATE UNIQUE INDEX panky_one_active_resource_ref
+  ON panky_resources(tool_id, resource_kind, external_ref)
+  WHERE status = 'active';
 
 CREATE TABLE panky_department_resources (
   department_id uuid NOT NULL REFERENCES panky_departments(department_id),

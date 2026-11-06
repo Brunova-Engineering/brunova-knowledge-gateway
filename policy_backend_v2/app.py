@@ -102,9 +102,12 @@ def _decide_external(item: ExternalRequest, database: PolicyStoreV2) -> dict:
              item.resource_kind, item.resource_ref),
         ).fetchone()
         if conn.execute(
-            "SELECT 1 FROM panky_resources WHERE tool_id=%s AND status='disabled' "
-            "AND ((resource_kind=%s AND external_ref=%s) "
-            "OR (resource_kind='source' AND external_ref=%s))",
+            "SELECT 1 FROM panky_resources d WHERE d.tool_id=%s AND d.status='disabled' "
+            "AND ((d.resource_kind=%s AND d.external_ref=%s) "
+            "OR (d.resource_kind='source' AND d.external_ref=%s)) "
+            "AND NOT EXISTS (SELECT 1 FROM panky_resources a WHERE a.tool_id=d.tool_id "
+            "AND a.resource_kind=d.resource_kind AND a.external_ref=d.external_ref "
+            "AND a.status='active')",
             (tool[0], item.resource_kind, item.resource_ref, item.parent_source),
         ).fetchone():
             return {"allowed": False, "reason": "resource_disabled"}

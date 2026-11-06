@@ -67,7 +67,6 @@ def activate(dsn: str, policy: Policy, registry: dict, topology: dict,
     role_ids = [stable("role", r.code) for r in policy.roles]
     seat_ids = [stable("seat", s.code) for s in policy.seats]
     tool_ids = [stable("tool", t.code) for t in policy.tools]
-    resource_ids = [stable("resource", r.code) for r in policy.resources]
     with psycopg.connect(dsn) as conn, conn.transaction():
         conn.execute("SELECT pg_advisory_xact_lock(8642092)")
         if conn.execute("SELECT 1 FROM panky_policy_releases WHERE core_commit=%s",
@@ -155,6 +154,9 @@ def activate(dsn: str, policy: Policy, registry: dict, topology: dict,
             )
         conn.execute("UPDATE panky_tools SET status='disabled' WHERE NOT(tool_id=ANY(%s))",
                      (tool_ids,))
+        # Old resource IDs stay for historical grants. Retire their active
+        # references before a renamed code can claim the same external ref.
+        conn.execute("UPDATE panky_resources SET status='disabled'")
         for r in policy.resources:
             conn.execute(
                 "INSERT INTO panky_resources(resource_id,tool_id,resource_kind,external_ref,status) "
@@ -164,8 +166,6 @@ def activate(dsn: str, policy: Policy, registry: dict, topology: dict,
                 (stable("resource", r.code), stable("tool", r.tool), r.resource_kind,
                  r.external_ref),
             )
-        conn.execute("UPDATE panky_resources SET status='disabled' WHERE NOT(resource_id=ANY(%s))",
-                     (resource_ids,))
         conn.execute("DELETE FROM panky_department_resources")
         for r in policy.resources:
             for department, relation in [(r.owner_department, "owned"),
