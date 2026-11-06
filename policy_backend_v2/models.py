@@ -72,7 +72,7 @@ class ContextRule(Strict):
     role: str | None = None
     target_class: Literal["department_context", "seat_context"]
     scope: Literal["department_subtree", "own_seat"]
-    surface: Literal["shared", "knowledge", "state", "work"]
+    surface: Literal["shared", "knowledge", "state", "work", "contributions"]
     operation: str
 
 
@@ -81,7 +81,7 @@ class Grant(Strict):
     subject: str
     target_kind: Literal["external_resource", "context_node"]
     target: str
-    surface: Literal["shared", "knowledge", "state", "work"] | None = None
+    surface: Literal["shared", "knowledge", "state", "work", "contributions"] | None = None
     operation: str
     effect: Literal["allow", "deny"]
     include_descendants: bool = False

@@ -206,6 +206,32 @@ def context_catalog(identity: PankyIdentity) -> dict:
         raise PankyBridgeError("Panky 2.0 context catalog is unavailable") from None
 
 
+def context_decision(identity: PankyIdentity, *, node_id: str, surface: str,
+                     operation: str, request_id: str, preview: bool = False) -> dict:
+    """Ask the active policy service before an organizational context action."""
+    base = os.getenv("PANKY_POLICY_BACKEND_URL", "")
+    if not base.startswith("https://") or policy_v2_mode() != "enforce":
+        raise PankyBridgeError("Panky 2.0 context policy is unavailable")
+    try:
+        workload_token = id_token.fetch_id_token(GoogleRequest(), base)
+        response = httpx.post(
+            f"{base.rstrip('/')}/v2/context/decide",
+            headers={"Authorization": f"Bearer {workload_token}"},
+            json={"actor": {"issuer": identity.issuer, "subject": identity.subject,
+                            "email": identity.email}, "node_id": node_id,
+                  "surface": surface, "operation": operation, "request_id": request_id,
+                  "preview": preview},
+            timeout=5,
+        )
+        response.raise_for_status()
+        result = response.json()
+        if not isinstance(result, dict) or not isinstance(result.get("allowed"), bool):
+            raise ValueError("invalid context decision")
+        return result
+    except (httpx.HTTPError, ValueError, TypeError):
+        raise PankyBridgeError("Panky 2.0 context decision is unavailable") from None
+
+
 def complete_policy_use(reservation_id: str, request_id: str, status: str) -> None:
     base = os.getenv("PANKY_POLICY_BACKEND_URL", "")
     if not base.startswith("https://"):

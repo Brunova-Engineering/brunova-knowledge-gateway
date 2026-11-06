@@ -155,7 +155,7 @@ def decide_context(item: ContextRequest, _: None = Depends(require_gateway),
             issuer=item.actor.issuer, subject=item.actor.subject, email=item.actor.email,
             request=Request(actor_id, "context_node", item.node_id,
                             item.operation, item.surface),
-            request_id=item.request_id, preview=False,
+            request_id=item.request_id, preview=item.preview,
         )
     except Exception:
         raise HTTPException(503, "Policy decision is unavailable") from None

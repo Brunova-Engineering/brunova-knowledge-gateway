@@ -116,7 +116,7 @@ CREATE TABLE panky_context_rules (
   target_class text NOT NULL CHECK (target_class IN
     ('department_context','seat_context')),
   scope text NOT NULL CHECK (scope IN ('department_subtree','own_seat')),
-  surface text NOT NULL CHECK (surface IN ('shared','knowledge','state','work')),
+  surface text NOT NULL CHECK (surface IN ('shared','knowledge','state','work','contributions')),
   operation text NOT NULL,
   status text NOT NULL CHECK (status IN ('active','disabled')),
   CHECK ((subject_kind = 'role_in_seat') = (role_id IS NOT NULL))
@@ -143,7 +143,7 @@ CREATE TABLE panky_grants (
   target_kind text NOT NULL CHECK (target_kind IN ('external_resource','context_node')),
   resource_id uuid REFERENCES panky_resources(resource_id),
   context_node_id text REFERENCES panky_context_nodes(node_id),
-  surface text CHECK (surface IN ('shared','knowledge','state','work')),
+  surface text CHECK (surface IN ('shared','knowledge','state','work','contributions')),
   operation text NOT NULL,
   effect text NOT NULL CHECK (effect IN ('allow','deny')),
   include_descendants boolean NOT NULL DEFAULT false,
