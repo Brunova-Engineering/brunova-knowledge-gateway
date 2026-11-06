@@ -222,3 +222,46 @@ def test_v2_shadow_disagreement_never_changes_v1_decision(monkeypatch, caplog):
     assert paths == ["https://policy.example.invalid/v1/decide",
                      "https://policy.example.invalid/v2/decisions/preview"]
     assert "decision mismatch" in caplog.text
+
+
+def test_v2_enforce_routes_oidc_decision_catalog_and_completion(monkeypatch):
+    from app.auth import panky_bridge
+
+    monkeypatch.setenv("PANKY_POLICY_BACKEND_URL", "https://policy.example.invalid")
+    monkeypatch.setenv("PANKY_POLICY_V2_MODE", "enforce")
+    monkeypatch.setattr(panky_bridge.id_token, "fetch_id_token",
+                        lambda request, audience: "synthetic-service-proof")
+    calls = []
+
+    def reply(url, **kwargs):
+        calls.append((url, kwargs["json"]))
+        if url.endswith("/v2/decisions/preview"):
+            payload = [{"allowed": False}]
+        elif url.endswith("/v2/uses/complete"):
+            payload = {"completed": True}
+        else:
+            payload = {"allowed": False, "reason": "no_authorized_seat"}
+        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: payload)
+
+    monkeypatch.setattr(panky_bridge.httpx, "post", reply)
+    identity = PankyIdentity("https://accounts.google.com", "synthetic-sub",
+                             "dev@example.invalid")
+    assert not policy_decision(
+        identity, provider="workspace", tool="retrieve_document",
+        resource_kind="source", resource_ref="hq_client",
+        operation="read", request_id="enforce-test",
+    )["allowed"]
+    assert not panky_bridge.preview_policy_decisions([{
+        "actor": {"issuer": identity.issuer, "subject": identity.subject,
+                  "email": identity.email},
+        "provider": "workspace", "tool": "retrieve_document",
+        "resource_kind": "source", "resource_ref": "hq_client",
+        "operation": "read", "request_id": "catalog-test",
+    }])[0]["allowed"]
+    panky_bridge.complete_policy_use("synthetic-use", "enforce-test", "released")
+    assert [url for url, _ in calls] == [
+        "https://policy.example.invalid/v2/decide",
+        "https://policy.example.invalid/v2/decisions/preview",
+        "https://policy.example.invalid/v2/uses/complete",
+    ]
+    assert isinstance(calls[1][1], list)

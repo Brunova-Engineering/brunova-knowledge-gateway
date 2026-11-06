@@ -23,6 +23,10 @@ The `/v2` routes use a **separate PostgreSQL database** selected only by
    but returns the current v1 decision; existing tokens and POST effects are
    unchanged. Collect comparisons, including denial, revocation and an
    interrupted or unavailable v2 service.
+6. Only after the live comparisons agree, set `PANKY_POLICY_V2_MODE=enforce`
+   for Panky OIDC requests. That mode uses `/v2/decide`, the v2 catalog preview
+   and v2 grant completion. Existing manual Gateway tokens keep their current
+   route throughout the bridge. An unavailable v2 decision fails closed.
 
 The bridge is not removed by this deployment. Removing it requires the
 separate approval requested by the Actor after live validation.
