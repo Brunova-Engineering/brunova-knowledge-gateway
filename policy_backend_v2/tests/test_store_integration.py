@@ -63,7 +63,14 @@ def example():
         ],
         "context_rules": [
             {"subject_kind": "any_active_seat", "target_class": "department_context", "scope": "department_subtree", "surface": "shared", "operation": "read"},
+            {"subject_kind": "any_active_seat", "target_class": "department_context", "scope": "department_subtree", "surface": "knowledge", "operation": "read"},
+            {"subject_kind": "any_active_seat", "target_class": "department_context", "scope": "department_subtree", "surface": "state", "operation": "read"},
+            {"subject_kind": "any_active_seat", "target_class": "department_context", "scope": "department_subtree", "surface": "work", "operation": "read"},
+            {"subject_kind": "role_in_seat", "role": "manager", "target_class": "department_context", "scope": "department_subtree", "surface": "knowledge", "operation": "update"},
             {"subject_kind": "role_in_seat", "role": "manager", "target_class": "department_context", "scope": "department_subtree", "surface": "work", "operation": "assign"},
+            {"subject_kind": "seat_occupant", "target_class": "seat_context", "scope": "own_seat", "surface": "knowledge", "operation": "read"},
+            {"subject_kind": "seat_occupant", "target_class": "seat_context", "scope": "own_seat", "surface": "state", "operation": "read"},
+            {"subject_kind": "seat_occupant", "target_class": "seat_context", "scope": "own_seat", "surface": "work", "operation": "read"},
             {"subject_kind": "seat_occupant", "target_class": "seat_context", "scope": "own_seat", "surface": "knowledge", "operation": "update"},
         ],
         "grants": [
@@ -78,11 +85,91 @@ def example():
     }}
     seat_by_node = {seat.context_node_id: seat.code for seat in policy.seats}
     nodes = {n.node_id: {"parent_id": n.parent_node_id, "owner_class": "organization",
+                         "backing_bindings": [{"store_id": f"store_{n.node_id}",
+                                               "repository": f"Pancracio-s/repo-{n.node_id}",
+                                               "generation": 1,
+                                               "mode": "authoritative",
+                                               "local_path": f"domains/nodes/{n.node_id}"}],
                          **({"seat_id": seat_by_node[n.node_id]} if n.kind == "seat" else {})}
              for n in policy.context_nodes}
     topology = {"nodes": nodes, "_seats": {
         s.code: {"status": "active", "occupied_by": s.occupants} for s in policy.seats}}
     return policy, registry, topology
+
+
+def test_catalog_follows_release_and_oidc_scope(db):
+    policy, registry, topology = example()
+    topology["nodes"]["ctx_hq"]["backing_bindings"].append({
+        "store_id": "hq_delivery", "repository": "Pancracio-s/repo-hq-delivery",
+        "generation": 1, "mode": "generated", "local_path": "domains/publications/hq"})
+    topology["nodes"]["ctx_dev"]["backing_bindings"].append({
+        "store_id": "dev_delivery", "repository": "Pancracio-s/repo-dev-delivery",
+        "generation": 1, "mode": "generated", "local_path": "domains/publications/dev"})
+    activate(db, policy, registry, topology, "f" * 40)
+    store = PolicyStoreV2(db)
+    catalog = store.context_catalog(issuer="https://accounts.google.com",
+                                    subject="oidc-dev", email="dev@example.invalid")
+    assert catalog["status"] == "ready"
+    assert catalog["release"] == "f" * 40
+    visible = {row["node_id"]: row for row in catalog["nodes"]}
+    assert "ctx_dev" in visible
+    assert "ctx_nat" not in visible
+    assert visible["ctx_dev"]["repository"] == "Pancracio-s/repo-ctx_dev"
+    assert visible["ctx_dev"]["binding_mode"] == "authoritative"
+    assert "delivery" not in visible["ctx_dev"]
+    assert visible["ctx_hq"]["repository"] == "Pancracio-s/repo-hq-delivery"
+    assert visible["ctx_hq"]["binding_mode"] == "generated"
+    nat = store.context_catalog(issuer="https://accounts.google.com",
+                                subject="oidc-nat", email="nat@example.invalid")
+    nat_nodes = {row["node_id"]: row for row in nat["nodes"]}
+    assert nat_nodes["ctx_hq"]["repository"] == "Pancracio-s/repo-ctx_hq"
+    assert nat_nodes["ctx_hq"]["binding_mode"] == "authoritative"
+    assert store.context_catalog(issuer="https://accounts.google.com",
+                                 subject="another-subject", email="dev@example.invalid")["status"] == "denied"
+
+
+def test_gateway_to_backend_catalog_end_to_end(db, monkeypatch):
+    from fastapi.testclient import TestClient
+    from app.main import app as gateway_app
+    from app.auth.panky_bridge import issue_access_token
+    from app.auth import panky_bridge
+    from policy_backend.app import require_gateway
+    from policy_backend_v2.app import app as backend_app, store as backend_store
+
+    policy, registry, topology = example()
+    activate(db, policy, registry, topology, "9" * 40)
+    backend_app.dependency_overrides[require_gateway] = lambda: None
+    backend_app.dependency_overrides[backend_store] = lambda: PolicyStoreV2(db)
+    monkeypatch.setenv("BRUNOVA_GATEWAY_TOKEN", "legacy-fixture-token-long-enough-123456")
+    monkeypatch.setenv("PANKY_POLICY_MODE", "shadow")
+    monkeypatch.setenv("PANKY_POLICY_V2_MODE", "enforce")
+    monkeypatch.setenv("PANKY_GATEWAY_SIGNING_KEY", "x" * 40)
+    monkeypatch.setenv("PANKY_DESKTOP_OAUTH_CLIENT_ID", "fixture-client")
+    monkeypatch.setenv("PANKY_POLICY_BACKEND_URL", "https://policy.example.invalid")
+    monkeypatch.setattr(panky_bridge.id_token, "verify_oauth2_token",
+                        lambda proof, request, audience: {
+                            "iss": "https://accounts.google.com", "aud": audience,
+                            "sub": "dev-sub", "email": "dev@example.invalid",
+                            "email_verified": True,
+                        })
+    monkeypatch.setattr(panky_bridge.id_token, "fetch_id_token",
+                        lambda request, audience: "synthetic-service-proof")
+    backend_client = TestClient(backend_app)
+    monkeypatch.setattr(panky_bridge.httpx, "post",
+                        lambda url, **kwargs: backend_client.post(
+                            url.removeprefix("https://policy.example.invalid"),
+                            json=kwargs["json"], headers=kwargs.get("headers")))
+    try:
+        bearer, _ = issue_access_token("synthetic-google-proof")
+        response = TestClient(gateway_app).get(
+            "/panky/context/catalog", headers={"Authorization": f"Bearer {bearer}"})
+        assert response.status_code == 200
+        assert response.json()["release"] == "9" * 40
+        node_ids = {row["node_id"] for row in response.json()["nodes"]}
+        assert "ctx_dev" in node_ids
+        assert "ctx_nat" not in node_ids
+    finally:
+        backend_app.dependency_overrides.clear()
 
 
 def test_publish_oidc_seats_exception_and_revoke(db):

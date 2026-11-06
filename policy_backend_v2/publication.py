@@ -41,6 +41,7 @@ def verify_core(policy: Policy, registry: dict, topology: dict) -> None:
             raise ValueError("Policy seat node lacks protected Seat binding")
         if node.kind != "seat" and core_node.get("seat_id") is not None:
             raise ValueError("Policy department node conflicts with Seat binding")
+        _node_repositories(core_node)
     core_seats = topology.get("_seats", {})
     active_seats = {code for code, record in core_seats.items()
                     if record.get("status") == "active"}
@@ -52,6 +53,26 @@ def verify_core(policy: Policy, registry: dict, topology: dict) -> None:
             raise ValueError("Policy Seat node points to another protected Seat")
         if set(record.get("occupied_by", [])) != set(seat.occupants):
             raise ValueError("Seat occupants differ from protected Core")
+
+
+def _node_repositories(core_node: dict) -> tuple[dict, dict | None]:
+    """A context has one authoritative repo; a delivery copy is not authority."""
+    bindings = core_node.get("backing_bindings")
+    if not isinstance(bindings, list):
+        raise ValueError("Protected context backings are unavailable")
+    authoritative = [b for b in bindings if b.get("mode") == "authoritative"]
+    generated = [b for b in bindings if b.get("mode") == "generated"]
+    if len(authoritative) != 1 or len(generated) > 1 or len(bindings) != len(authoritative) + len(generated):
+        raise ValueError("Context needs exactly one authoritative repository")
+    for binding in bindings:
+        if (not isinstance(binding.get("repository"), str)
+                or not binding["repository"].startswith("Pancracio-s/")
+                or not isinstance(binding.get("store_id"), str)
+                or not isinstance(binding.get("generation"), int)
+                or binding["generation"] < 1
+                or not isinstance(binding.get("local_path"), str)):
+            raise ValueError("Protected context repository binding is invalid")
+    return authoritative[0], generated[0] if generated else None
 
 
 def activate(dsn: str, policy: Policy, registry: dict, topology: dict,
@@ -89,11 +110,26 @@ def activate(dsn: str, policy: Policy, registry: dict, topology: dict,
 
         # Two-pass upserts avoid FK ordering dependencies in protected trees.
         for node in policy.context_nodes:
+            source, delivery = _node_repositories(topology["nodes"][node.node_id])
             conn.execute(
-                "INSERT INTO panky_context_nodes(node_id,parent_node_id,kind,visibility,lifecycle) "
-                "VALUES (%s,NULL,%s,%s,%s) ON CONFLICT(node_id) DO UPDATE SET "
-                "kind=EXCLUDED.kind,visibility=EXCLUDED.visibility,lifecycle=EXCLUDED.lifecycle",
-                (node.node_id, node.kind, node.visibility, node.lifecycle),
+                "INSERT INTO panky_context_nodes(node_id,parent_node_id,kind,visibility,lifecycle,"
+                "repository,store_id,generation,local_path,delivery_repository,delivery_store_id,"
+                "delivery_generation,delivery_local_path) "
+                "VALUES (%s,NULL,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "ON CONFLICT(node_id) DO UPDATE SET "
+                "kind=EXCLUDED.kind,visibility=EXCLUDED.visibility,lifecycle=EXCLUDED.lifecycle,"
+                "repository=EXCLUDED.repository,store_id=EXCLUDED.store_id,"
+                "generation=EXCLUDED.generation,local_path=EXCLUDED.local_path,"
+                "delivery_repository=EXCLUDED.delivery_repository,"
+                "delivery_store_id=EXCLUDED.delivery_store_id,"
+                "delivery_generation=EXCLUDED.delivery_generation,"
+                "delivery_local_path=EXCLUDED.delivery_local_path",
+                (node.node_id, node.kind, node.visibility, node.lifecycle,
+                 source["repository"], source["store_id"], source["generation"],
+                 source["local_path"], delivery["repository"] if delivery else None,
+                 delivery["store_id"] if delivery else None,
+                 delivery["generation"] if delivery else None,
+                 delivery["local_path"] if delivery else None),
             )
         conn.execute("UPDATE panky_context_nodes SET lifecycle='archived' WHERE NOT(node_id=ANY(%s))",
                      (node_ids,))

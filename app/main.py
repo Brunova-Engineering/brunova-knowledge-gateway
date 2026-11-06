@@ -49,7 +49,7 @@ from app.source_registry import SourceRegistry, SourceRegistryMetadata
 from app.auth.pubsub_push import parse_pubsub_signal, verify_pubsub_oidc
 from app.agent_signals import AgentSignalInbox
 from app.runtime import get_runtime_gateway
-from app.auth.panky_bridge import PankyBridgeError, issue_access_token
+from app.auth.panky_bridge import PankyBridgeError, PankyIdentity, context_catalog, issue_access_token
 from pydantic import BaseModel
 
 
@@ -78,6 +78,20 @@ def exchange_panky_token(request: PankyTokenExchange):
     except PankyBridgeError:
         raise HTTPException(401, "Google identity proof is not accepted") from None
     return {"access_token": token, "token_type": "Bearer", "expires_in": lifetime}
+
+
+@app.get("/panky/context/catalog")
+def panky_context_catalog(request: Request):
+    principal = getattr(request.state, "principal", None)
+    if (principal is None or principal.type != "panky"
+            or not principal.oidc_subject or not principal.oidc_email):
+        raise HTTPException(403, "Panky OIDC identity is required")
+    try:
+        return context_catalog(PankyIdentity("https://accounts.google.com",
+                                             principal.oidc_subject,
+                                             principal.oidc_email))
+    except PankyBridgeError:
+        raise HTTPException(503, "Context catalog is unavailable") from None
 
 
 def _get_valid_settings() -> Settings:
