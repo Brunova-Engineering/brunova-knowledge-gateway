@@ -8,7 +8,10 @@ from types import SimpleNamespace
 import pytest
 
 from app.auth.gateway_auth import GatewayPrincipalAuthenticator
-from app.auth.panky_bridge import PankyBridgeError, issue_access_token, verify_access_token
+from app.auth.panky_bridge import (
+    PankyBridgeError, PankyIdentity, issue_access_token, policy_decision,
+    verify_access_token,
+)
 from app.auth.principals import PrincipalResolver
 from app.auth.principals import Principal, bind_principal, reset_principal
 from app.mcp_server import mcp_server
@@ -192,3 +195,30 @@ def test_policy_allowed_panky_can_read_acquisition_without_widening_developer(mo
         reset_principal(binding)
     assert denied.is_error
     assert len(calls) == 1
+
+
+def test_v2_shadow_disagreement_never_changes_v1_decision(monkeypatch, caplog):
+    from app.auth import panky_bridge
+
+    monkeypatch.setenv("PANKY_POLICY_BACKEND_URL", "https://policy.example.invalid")
+    monkeypatch.setenv("PANKY_POLICY_V2_MODE", "shadow")
+    monkeypatch.setattr(panky_bridge.id_token, "fetch_id_token",
+                        lambda request, audience: "synthetic-service-proof")
+    paths = []
+
+    def reply(url, **kwargs):
+        paths.append(url)
+        payload = ({"allowed": True} if url.endswith("/v1/decide")
+                   else [{"allowed": False}])
+        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: payload)
+
+    monkeypatch.setattr(panky_bridge.httpx, "post", reply)
+    result = policy_decision(
+        PankyIdentity("https://accounts.google.com", "synthetic-sub", "dev@example.invalid"),
+        provider="workspace", tool="retrieve_document", resource_kind="source",
+        resource_ref="hq_client", operation="read", request_id="shadow-test",
+    )
+    assert result["allowed"] is True
+    assert paths == ["https://policy.example.invalid/v1/decide",
+                     "https://policy.example.invalid/v2/decisions/preview"]
+    assert "decision mismatch" in caplog.text

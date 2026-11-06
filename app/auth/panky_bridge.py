@@ -6,6 +6,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -18,6 +19,9 @@ from google.oauth2 import id_token
 
 class PankyBridgeError(ValueError):
     pass
+
+
+_LOG = logging.getLogger(__name__)
 
 
 def bridge_mode() -> str:
@@ -145,6 +149,32 @@ def policy_decision(
         result = response.json()
         if not isinstance(result.get("allowed"), bool):
             raise ValueError("invalid policy response")
+        # Shadow only: compare the new model without changing the existing
+        # authorization result or reserving a one-use grant.
+        if os.getenv("PANKY_POLICY_V2_MODE", "off") == "shadow":
+            try:
+                shadow = httpx.post(
+                    f"{base.rstrip('/')}/v2/decisions/preview",
+                    headers={"Authorization": f"Bearer {workload_token}"},
+                    json=[{
+                        "actor": {"issuer": identity.issuer,
+                                  "subject": identity.subject, "email": identity.email},
+                        "provider": provider, "tool": tool,
+                        "resource_kind": resource_kind, "resource_ref": resource_ref,
+                        "parent_source": parent_source, "operation": operation,
+                        "request_id": request_id, "preview": True,
+                    }],
+                    timeout=5,
+                )
+                shadow.raise_for_status()
+                outcomes = shadow.json()
+                if len(outcomes) != 1 or not isinstance(outcomes[0].get("allowed"), bool):
+                    raise ValueError("invalid v2 preview")
+                if outcomes[0]["allowed"] != result["allowed"]:
+                    _LOG.warning("Panky policy v1/v2 decision mismatch: provider=%s operation=%s",
+                                 provider, operation)
+            except (httpx.HTTPError, ValueError, KeyError, TypeError):
+                _LOG.warning("Panky policy v2 shadow comparison unavailable")
         return result
     except (httpx.HTTPError, ValueError):
         raise PankyBridgeError("Policy decision is unavailable") from None
