@@ -293,6 +293,11 @@ def test_context_catalog_requires_v2_and_forwards_verified_actor(monkeypatch):
     assert calls[0][0] == "https://policy.example.invalid/v2/context/catalog"
     assert calls[0][1]["json"] == {"issuer": identity.issuer,
                                     "subject": identity.subject, "email": identity.email}
+    monkeypatch.setattr(panky_bridge.httpx, "post", lambda *_args, **_kwargs:
+                        SimpleNamespace(raise_for_status=lambda: None,
+                                        json=lambda: {"status": "denied", "reason": "actor_disabled"}))
+    assert panky_bridge.context_catalog(identity) == {
+        "status": "denied", "reason": "actor_disabled"}
 
 
 def test_gateway_catalog_rejects_legacy_token_and_scopes_oidc_actor(

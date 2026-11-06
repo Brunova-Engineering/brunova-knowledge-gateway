@@ -59,8 +59,10 @@ class PolicyStoreV2:
                     "WHERE oidc_issuer=%s AND email=%s FOR UPDATE",
                     (issuer, email.casefold()),
                 ).fetchone()
-                if actor is None or actor["status"] != "active":
+                if actor is None:
                     return {"status": "denied", "reason": "actor_unknown"}
+                if actor["status"] != "active":
+                    return {"status": "denied", "reason": "actor_disabled"}
                 if actor["oidc_subject"] is not None and actor["oidc_subject"] != subject:
                     return {"status": "denied", "reason": "subject_mismatch"}
                 if actor["oidc_subject"] is None:

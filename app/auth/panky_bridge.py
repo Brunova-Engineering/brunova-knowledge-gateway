@@ -197,6 +197,8 @@ def context_catalog(identity: PankyIdentity) -> dict:
         )
         response.raise_for_status()
         catalog = response.json()
+        if catalog == {"status": "denied", "reason": "actor_disabled"}:
+            return catalog
         if (catalog.get("status") != "ready"
                 or not isinstance(catalog.get("nodes"), list)
                 or not isinstance(catalog.get("release"), str)):

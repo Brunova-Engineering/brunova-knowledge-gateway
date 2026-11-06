@@ -156,6 +156,11 @@ def test_catalog_follows_release_and_oidc_scope(db):
     legacy_nodes = {row["node_id"]: row for row in legacy["nodes"]}
     assert legacy_nodes["ctx_hq"]["repository"] == "Pancracio-s/repo-hq-delivery"
     assert legacy_nodes["ctx_hq"]["binding_mode"] == "generated"
+    with psycopg.connect(db) as conn:
+        conn.execute("UPDATE panky_actors SET status='disabled' WHERE actor_id='act_dev_001'")
+    assert store.context_catalog(issuer="https://accounts.google.com",
+                                 subject="oidc-dev", email="dev@example.invalid") == {
+        "status": "denied", "reason": "actor_disabled"}
 
 
 def test_gateway_to_backend_catalog_end_to_end(db, monkeypatch):
@@ -210,6 +215,12 @@ def test_gateway_to_backend_catalog_end_to_end(db, monkeypatch):
                   "request_id": "hq-write", "preview": False})
         assert allowed.status_code == 200 and allowed.json()["allowed"] is True
         assert denied.status_code == 200 and denied.json()["allowed"] is False
+        with psycopg.connect(db) as conn:
+            conn.execute("UPDATE panky_actors SET status='disabled' WHERE actor_id='act_dev_001'")
+        revoked = TestClient(gateway_app).get(
+            "/panky/context/catalog", headers={"Authorization": f"Bearer {bearer}"})
+        assert revoked.status_code == 200
+        assert revoked.json() == {"status": "denied", "reason": "actor_disabled"}
     finally:
         backend_app.dependency_overrides.clear()
 
