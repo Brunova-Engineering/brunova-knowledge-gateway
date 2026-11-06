@@ -6,6 +6,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -20,10 +21,20 @@ class PankyBridgeError(ValueError):
     pass
 
 
+_LOG = logging.getLogger(__name__)
+
+
 def bridge_mode() -> str:
     mode = os.getenv("PANKY_POLICY_MODE", "off")
     if mode not in {"off", "shadow", "enforce"}:
         raise PankyBridgeError("Invalid policy bridge mode")
+    return mode
+
+
+def policy_v2_mode() -> str:
+    mode = os.getenv("PANKY_POLICY_V2_MODE", "off")
+    if mode not in {"off", "shadow", "enforce"}:
+        raise PankyBridgeError("Invalid Panky 2.0 policy mode")
     return mode
 
 
@@ -126,25 +137,46 @@ def policy_decision(
     base = os.getenv("PANKY_POLICY_BACKEND_URL", "")
     if not base.startswith("https://"):
         raise PankyBridgeError("Policy backend URL is unavailable")
+    mode = policy_v2_mode()
     try:
         workload_token = id_token.fetch_id_token(GoogleRequest(), base)
+        payload = {
+            "actor": {"issuer": identity.issuer,
+                      "subject": identity.subject, "email": identity.email},
+            "provider": provider, "tool": tool,
+            "resource_kind": resource_kind, "resource_ref": resource_ref,
+            "parent_source": parent_source,
+            "operation": operation, "request_id": request_id,
+        }
         response = httpx.post(
-            f"{base.rstrip('/')}/v1/decide",
+            f"{base.rstrip('/')}/{'v2' if mode == 'enforce' else 'v1'}/decide",
             headers={"Authorization": f"Bearer {workload_token}"},
-            json={
-                "actor": {"issuer": identity.issuer,
-                          "subject": identity.subject, "email": identity.email},
-                "provider": provider, "tool": tool,
-                "resource_kind": resource_kind, "resource_ref": resource_ref,
-                "parent_source": parent_source,
-                "operation": operation, "request_id": request_id,
-            },
+            json=payload,
             timeout=5,
         )
         response.raise_for_status()
         result = response.json()
         if not isinstance(result.get("allowed"), bool):
             raise ValueError("invalid policy response")
+        # Shadow only: compare the new model without changing the existing
+        # authorization result or reserving a one-use grant.
+        if mode == "shadow":
+            try:
+                shadow = httpx.post(
+                    f"{base.rstrip('/')}/v2/decisions/preview",
+                    headers={"Authorization": f"Bearer {workload_token}"},
+                    json=[{**payload, "preview": True}],
+                    timeout=5,
+                )
+                shadow.raise_for_status()
+                outcomes = shadow.json()
+                if len(outcomes) != 1 or not isinstance(outcomes[0].get("allowed"), bool):
+                    raise ValueError("invalid v2 preview")
+                if outcomes[0]["allowed"] != result["allowed"]:
+                    _LOG.warning("Panky policy v1/v2 decision mismatch: provider=%s operation=%s",
+                                 provider, operation)
+            except (httpx.HTTPError, ValueError, KeyError, TypeError):
+                _LOG.warning("Panky policy v2 shadow comparison unavailable")
         return result
     except (httpx.HTTPError, ValueError):
         raise PankyBridgeError("Policy decision is unavailable") from None
@@ -154,10 +186,11 @@ def complete_policy_use(reservation_id: str, request_id: str, status: str) -> No
     base = os.getenv("PANKY_POLICY_BACKEND_URL", "")
     if not base.startswith("https://"):
         raise PankyBridgeError("Policy backend URL is unavailable")
+    mode = policy_v2_mode()
     try:
         workload_token = id_token.fetch_id_token(GoogleRequest(), base)
         response = httpx.post(
-            f"{base.rstrip('/')}/v1/uses/complete",
+            f"{base.rstrip('/')}/{'v2' if mode == 'enforce' else 'v1'}/uses/complete",
             headers={"Authorization": f"Bearer {workload_token}"},
             json={"reservation_id": reservation_id,
                   "request_id": request_id, "status": status},
@@ -172,12 +205,13 @@ def preview_policy_decisions(requests: list[dict]) -> list[dict]:
     base = os.getenv("PANKY_POLICY_BACKEND_URL", "")
     if not base.startswith("https://"):
         raise PankyBridgeError("Policy backend URL is unavailable")
+    mode = policy_v2_mode()
     try:
         workload_token = id_token.fetch_id_token(GoogleRequest(), base)
         response = httpx.post(
-            f"{base.rstrip('/')}/v1/decisions/preview",
+            f"{base.rstrip('/')}/{'v2' if mode == 'enforce' else 'v1'}/decisions/preview",
             headers={"Authorization": f"Bearer {workload_token}"},
-            json={"requests": requests}, timeout=20,
+            json=requests if mode == "enforce" else {"requests": requests}, timeout=20,
         )
         response.raise_for_status()
         result = response.json()

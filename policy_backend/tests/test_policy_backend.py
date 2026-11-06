@@ -214,7 +214,7 @@ def test_private_api_requires_gateway_identity(database, monkeypatch):
         client = TestClient(policy_app)
         assert client.get("/health").status_code == 200
         assert client.post("/v1/decide", json=request().model_dump()).status_code == 401
-        monkeypatch.setattr("policy_backend.app.id_token.verify_oauth2_token",
+        monkeypatch.setattr("policy_backend.service_auth.id_token.verify_oauth2_token",
                             lambda token, request, audience: {
                                 "iss": "https://accounts.google.com",
                                 "aud": audience,
@@ -232,8 +232,6 @@ def test_private_api_requires_gateway_identity(database, monkeypatch):
 
 
 def test_core_workflow_publishes_only_its_exact_main_commit(database, monkeypatch):
-    from policy_backend.app import github_jwks
-
     commit = "e" * 40
     registry_yaml = yaml.safe_dump({"actors": {
         "admin": {"status": "active", "roles": ["super_admin"],
@@ -251,10 +249,10 @@ def test_core_workflow_publishes_only_its_exact_main_commit(database, monkeypatc
         "workflow_ref": "Pancracio-s/pancracio-core/.github/workflows/publish-gateway-policy.yml@refs/heads/main",
         "sha": commit,
     }
-    monkeypatch.setattr("policy_backend.app.github_jwks", lambda: type(
+    monkeypatch.setattr("policy_backend.service_auth.github_jwks", lambda: type(
         "Keys", (), {"get_signing_key_from_jwt": lambda self, token: type(
             "Key", (), {"key": "synthetic-key"})()})())
-    monkeypatch.setattr("policy_backend.app.jwt.decode",
+    monkeypatch.setattr("policy_backend.service_auth.jwt.decode",
                         lambda *args, **kwargs: claims)
     policy_app.dependency_overrides[store_dependency] = lambda: PolicyStore(database)
     try:

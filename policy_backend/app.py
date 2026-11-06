@@ -5,16 +5,14 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 
-import jwt
 import psycopg
 import yaml
-from fastapi import Depends, FastAPI, Header, HTTPException
-from google.auth.transport.requests import Request as GoogleRequest
-from google.oauth2 import id_token
+from fastapi import Depends, FastAPI, HTTPException
 
 from .models import DecisionBatchRequest, DecisionRequest, DecisionResponse, GrantUseCompletion
 from .store import PolicyStore
 from .publication import PolicyDocument, activate_policy
+from .service_auth import require_core_workflow, require_gateway
 from pydantic import BaseModel, Field
 
 app = FastAPI(title="Panky policy backend", docs_url=None, redoc_url=None)
@@ -27,62 +25,11 @@ class CorePublicationRequest(BaseModel):
 
 
 @lru_cache
-def github_jwks() -> jwt.PyJWKClient:
-    return jwt.PyJWKClient(
-        "https://token.actions.githubusercontent.com/.well-known/jwks",
-        timeout=5,
-    )
-
-
-def require_core_workflow(authorization: str | None = Header(default=None)) -> dict:
-    scheme, separator, token = (authorization or "").partition(" ")
-    if not separator or scheme.casefold() != "bearer" or not token:
-        raise HTTPException(401, "Core workflow identity is required")
-    try:
-        signing_key = github_jwks().get_signing_key_from_jwt(token)
-        claims = jwt.decode(
-            token, signing_key.key, algorithms=["RS256"],
-            audience="https://brunova.mx/panky-policy",
-            issuer="https://token.actions.githubusercontent.com",
-            options={"require": ["exp", "iat", "nbf", "iss", "aud", "sha"]},
-        )
-    except (jwt.PyJWTError, jwt.PyJWKClientError, ValueError):
-        raise HTTPException(401, "Core workflow identity is invalid") from None
-    if (str(claims.get("repository_id")) != "1391259854"
-            or claims.get("repository") != "Pancracio-s/pancracio-core"
-            or claims.get("ref") != "refs/heads/main"
-            or claims.get("event_name") not in {"push", "workflow_dispatch"}
-            or claims.get("workflow_ref") !=
-            "Pancracio-s/pancracio-core/.github/workflows/publish-gateway-policy.yml@refs/heads/main"):
-        raise HTTPException(403, "Core workflow is not authorized")
-    return claims
-
-
-@lru_cache
 def store() -> PolicyStore:
     dsn = os.environ.get("PANKY_POLICY_DSN", "")
     if not dsn:
         raise RuntimeError("Policy database is not configured")
     return PolicyStore(dsn)
-
-
-def require_gateway(authorization: str | None = Header(default=None)) -> None:
-    audience = os.environ.get("PANKY_POLICY_AUDIENCE", "")
-    gateway_email = os.environ.get("PANKY_GATEWAY_SERVICE_ACCOUNT", "")
-    if not audience or not gateway_email:
-        raise HTTPException(503, "Policy service identity is not configured")
-    scheme, separator, token = (authorization or "").partition(" ")
-    if not separator or scheme.casefold() != "bearer" or not token:
-        raise HTTPException(401, "Invalid Gateway identity")
-    try:
-        claims = id_token.verify_oauth2_token(token, GoogleRequest(), audience)
-    except (ValueError, TypeError):
-        raise HTTPException(401, "Invalid Gateway identity") from None
-    if (claims.get("email") != gateway_email
-            or claims.get("email_verified") is not True
-            or claims.get("iss") not in
-            {"https://accounts.google.com", "accounts.google.com"}):
-        raise HTTPException(403, "Gateway identity is not authorized")
 
 
 @app.get("/health")
@@ -167,3 +114,9 @@ def publish_from_core(
     except Exception:
         raise HTTPException(503, "Core policy publication is unavailable") from None
     return {"release_id": release, "core_commit": request.core_commit}
+
+
+# Keep the deployed v1 service and URL unchanged while the v2 policy is
+# tested in its own database. The bridge continues to call /v1 routes.
+from policy_backend_v2.app import app as v2_app  # noqa: E402
+app.include_router(v2_app.router)
