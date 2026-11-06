@@ -127,7 +127,8 @@ class GatewayAuthenticationMiddleware:
                 return
         elif principal.type == "panky" and not (
             request.url.path.startswith("/mcp")
-            or request.url.path == "/panky/context/catalog"
+            or request.url.path in {"/panky/context/catalog", "/panky/context/decide",
+                                    "/panky/context/uses/complete"}
         ):
             await self._reject(
                 scope=scope, receive=receive, send=send,

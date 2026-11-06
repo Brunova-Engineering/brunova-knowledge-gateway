@@ -72,6 +72,7 @@ def example():
             {"subject_kind": "seat_occupant", "target_class": "seat_context", "scope": "own_seat", "surface": "state", "operation": "read"},
             {"subject_kind": "seat_occupant", "target_class": "seat_context", "scope": "own_seat", "surface": "work", "operation": "read"},
             {"subject_kind": "seat_occupant", "target_class": "seat_context", "scope": "own_seat", "surface": "knowledge", "operation": "update"},
+            {"subject_kind": "seat_occupant", "target_class": "seat_context", "scope": "own_seat", "surface": "contributions", "operation": "create"},
         ],
         "grants": [
             {"subject_kind": "seat", "subject": "finance_contributor", "target_kind": "context_node", "target": "ctx_budget", "surface": "knowledge", "operation": "update", "effect": "allow", "valid_from": at, "max_uses": 1, "reason": "one budget update", "approved_by": "act_jorge"},
@@ -168,6 +169,18 @@ def test_gateway_to_backend_catalog_end_to_end(db, monkeypatch):
         node_ids = {row["node_id"] for row in response.json()["nodes"]}
         assert "ctx_dev" in node_ids
         assert "ctx_nat" not in node_ids
+        allowed = TestClient(gateway_app).post(
+            "/panky/context/decide",
+            headers={"Authorization": f"Bearer {bearer}"},
+            json={"node_id": "ctx_dev", "surface": "knowledge", "operation": "update",
+                  "request_id": "own-seat-write", "preview": False})
+        denied = TestClient(gateway_app).post(
+            "/panky/context/decide",
+            headers={"Authorization": f"Bearer {bearer}"},
+            json={"node_id": "ctx_hq", "surface": "knowledge", "operation": "update",
+                  "request_id": "hq-write", "preview": False})
+        assert allowed.status_code == 200 and allowed.json()["allowed"] is True
+        assert denied.status_code == 200 and denied.json()["allowed"] is False
     finally:
         backend_app.dependency_overrides.clear()
 
@@ -192,6 +205,8 @@ def test_publish_oidc_seats_exception_and_revoke(db):
     assert call("dev@example.invalid", "wrong-sub", "act_dev_001", "external_resource", hq, "read")["reason"] == "subject_mismatch"
     assert call("nat@example.invalid", "oidc-nat", "act_nat", "context_node", "ctx_hq", "assign", "work")["allowed"]
     assert not call("nat@example.invalid", "oidc-nat", "act_nat", "context_node", "ctx_hq", "delete", "knowledge")["allowed"]
+    assert call("dev@example.invalid", "oidc-dev", "act_dev_001", "context_node", "ctx_dev", "create", "contributions")["allowed"]
+    assert not call("dev@example.invalid", "oidc-dev", "act_dev_001", "context_node", "ctx_hq", "create", "contributions")["allowed"]
     first = call("dev@example.invalid", "oidc-dev", "act_dev_001", "context_node", "ctx_budget", "update", "knowledge", "budget1")
     assert first["allowed"] and first["reservation_id"]
     assert store.complete_use(first["reservation_id"], "budget1", "committed")

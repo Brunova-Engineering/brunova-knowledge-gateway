@@ -49,12 +49,26 @@ from app.source_registry import SourceRegistry, SourceRegistryMetadata
 from app.auth.pubsub_push import parse_pubsub_signal, verify_pubsub_oidc
 from app.agent_signals import AgentSignalInbox
 from app.runtime import get_runtime_gateway
-from app.auth.panky_bridge import PankyBridgeError, PankyIdentity, context_catalog, issue_access_token
+from app.auth.panky_bridge import PankyBridgeError, PankyIdentity, context_catalog, context_decision, issue_access_token
 from pydantic import BaseModel
 
 
 class PankyTokenExchange(BaseModel):
     google_id_token: str
+
+
+class PankyContextAction(BaseModel):
+    node_id: str
+    surface: str
+    operation: str
+    request_id: str
+    preview: bool = False
+
+
+class PankyContextCompletion(BaseModel):
+    reservation_id: str
+    request_id: str
+    status: str
 
 
 @asynccontextmanager
@@ -92,6 +106,42 @@ def panky_context_catalog(request: Request):
                                              principal.oidc_email))
     except PankyBridgeError:
         raise HTTPException(503, "Context catalog is unavailable") from None
+
+
+@app.post("/panky/context/decide")
+def panky_context_decide(item: PankyContextAction, request: Request):
+    principal = getattr(request.state, "principal", None)
+    if (principal is None or principal.type != "panky"
+            or not principal.oidc_subject or not principal.oidc_email):
+        raise HTTPException(403, "Panky OIDC identity is required")
+    if (item.surface not in {"knowledge", "state", "work", "contributions"}
+            or item.operation not in {"read", "update", "assign", "create"}
+            or not item.node_id or not item.request_id):
+        raise HTTPException(422, "Unsupported context action")
+    try:
+        return context_decision(PankyIdentity("https://accounts.google.com",
+                                              principal.oidc_subject, principal.oidc_email),
+                                node_id=item.node_id, surface=item.surface,
+                                operation=item.operation, request_id=item.request_id,
+                                preview=item.preview)
+    except PankyBridgeError:
+        raise HTTPException(503, "Context decision is unavailable") from None
+
+
+@app.post("/panky/context/uses/complete")
+def panky_context_complete(item: PankyContextCompletion, request: Request):
+    principal = getattr(request.state, "principal", None)
+    if (principal is None or principal.type != "panky"
+            or not principal.oidc_subject or not principal.oidc_email):
+        raise HTTPException(403, "Panky OIDC identity is required")
+    if item.status not in {"committed", "released", "uncertain"}:
+        raise HTTPException(422, "Unsupported completion status")
+    try:
+        from app.auth.panky_bridge import complete_policy_use
+        complete_policy_use(item.reservation_id, item.request_id, item.status)
+        return {"completed": True}
+    except PankyBridgeError:
+        raise HTTPException(503, "Context use completion is unavailable") from None
 
 
 def _get_valid_settings() -> Settings:

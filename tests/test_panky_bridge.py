@@ -327,3 +327,39 @@ def test_gateway_catalog_rejects_legacy_token_and_scopes_oidc_actor(
     assert allowed.status_code == 200
     assert allowed.json()["status"] == "ready"
     assert len(calls) == 1 and calls[0].subject == "google-subject"
+
+
+def test_gateway_context_decision_rejects_legacy_and_uses_verified_actor(
+    monkeypatch, ephemeral_gateway_token,
+):
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    monkeypatch.setenv("PANKY_POLICY_MODE", "shadow")
+    monkeypatch.setenv("PANKY_GATEWAY_SIGNING_KEY", "x" * 40)
+    monkeypatch.setenv("PANKY_DESKTOP_OAUTH_CLIENT_ID", "fixture-client")
+    monkeypatch.setattr("app.auth.panky_bridge.id_token.verify_oauth2_token",
+                        lambda proof, request, audience: {
+                            "iss": "https://accounts.google.com", "aud": audience,
+                            "sub": "google-subject", "email": "dev@example.invalid",
+                            "email_verified": True,
+                        })
+    seen = []
+
+    def decide(identity, **kwargs):
+        seen.append((identity, kwargs))
+        return {"allowed": False, "reason": "no_authorized_seat"}
+
+    monkeypatch.setattr("app.main.context_decision", decide)
+    bearer, _ = issue_access_token("verified-fixture-proof")
+    client = TestClient(app)
+    body = {"node_id": "ctx_hq", "surface": "knowledge", "operation": "update",
+            "request_id": "fixture-request", "preview": False}
+    denied = client.post("/panky/context/decide", json=body,
+                         headers={"Authorization": f"Bearer {ephemeral_gateway_token}"})
+    allowed = client.post("/panky/context/decide", json=body,
+                          headers={"Authorization": f"Bearer {bearer}"})
+    assert denied.status_code == 403
+    assert allowed.status_code == 200 and allowed.json()["allowed"] is False
+    assert seen[0][0].subject == "google-subject"
+    assert seen[0][1] == body
