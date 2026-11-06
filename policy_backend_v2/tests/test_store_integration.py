@@ -7,7 +7,7 @@ import psycopg
 import pytest
 
 from policy_backend_v2.decision import Request
-from policy_backend_v2.models import Policy
+from policy_backend_v2.models import Policy, ContextNode, Grant
 from policy_backend_v2.publication import activate
 from policy_backend_v2.store import PolicyStoreV2
 
@@ -100,12 +100,24 @@ def example():
 
 def test_catalog_follows_release_and_oidc_scope(db):
     policy, registry, topology = example()
-    topology["nodes"]["ctx_hq"]["backing_bindings"].append({
+    policy = policy.model_copy(deep=True)
+    policy.context_nodes.extend([
+        ContextNode(node_id="ctx_hq_delivery", parent_node_id="ctx_root",
+                    kind="subcontext", visibility="restricted"),
+        ContextNode(node_id="ctx_dev_delivery", parent_node_id="ctx_hq",
+                    kind="subcontext", visibility="restricted"),
+    ])
+    for node_id in ("ctx_hq_delivery", "ctx_dev_delivery"):
+        policy.grants.append(Grant(subject_kind="seat", subject="dev_01",
+            target_kind="context_node", target=node_id, surface="knowledge",
+            operation="read", effect="allow", valid_from=datetime(2020, 1, 1, tzinfo=timezone.utc),
+            reason="approved delivery context", approved_by="act_jorge"))
+    topology["nodes"]["ctx_hq_delivery"] = {"parent_id": "ctx_root", "owner_class": "organization", "backing_bindings": [{
         "store_id": "hq_delivery", "repository": "Pancracio-s/repo-hq-delivery",
-        "generation": 1, "mode": "generated", "local_path": "domains/publications/hq"})
-    topology["nodes"]["ctx_dev"]["backing_bindings"].append({
+        "generation": 1, "mode": "generated", "local_path": "domains/publications/hq"}]}
+    topology["nodes"]["ctx_dev_delivery"] = {"parent_id": "ctx_hq", "owner_class": "organization", "backing_bindings": [{
         "store_id": "dev_delivery", "repository": "Pancracio-s/repo-dev-delivery",
-        "generation": 1, "mode": "generated", "local_path": "domains/publications/dev"})
+        "generation": 1, "mode": "generated", "local_path": "domains/publications/dev"}]}
     activate(db, policy, registry, topology, "f" * 40)
     store = PolicyStoreV2(db)
     catalog = store.context_catalog(issuer="https://accounts.google.com",
@@ -118,8 +130,10 @@ def test_catalog_follows_release_and_oidc_scope(db):
     assert visible["ctx_dev"]["repository"] == "Pancracio-s/repo-ctx_dev"
     assert visible["ctx_dev"]["binding_mode"] == "authoritative"
     assert "delivery" not in visible["ctx_dev"]
-    assert visible["ctx_hq"]["repository"] == "Pancracio-s/repo-hq-delivery"
-    assert visible["ctx_hq"]["binding_mode"] == "generated"
+    assert visible["ctx_hq_delivery"]["repository"] == "Pancracio-s/repo-hq-delivery"
+    assert visible["ctx_hq_delivery"]["binding_mode"] == "generated"
+    assert visible["ctx_dev_delivery"]["binding_mode"] == "generated"
+    assert "ctx_hq" not in visible
     nat = store.context_catalog(issuer="https://accounts.google.com",
                                 subject="oidc-nat", email="nat@example.invalid")
     nat_nodes = {row["node_id"]: row for row in nat["nodes"]}
@@ -127,6 +141,21 @@ def test_catalog_follows_release_and_oidc_scope(db):
     assert nat_nodes["ctx_hq"]["binding_mode"] == "authoritative"
     assert store.context_catalog(issuer="https://accounts.google.com",
                                  subject="another-subject", email="dev@example.invalid")["status"] == "denied"
+
+    # A running bridge release can still expose its old delivery column while
+    # the Core publication and client package are being switched together.
+    with psycopg.connect(db) as conn:
+        conn.execute("UPDATE panky_context_nodes SET lifecycle='archived' "
+                     "WHERE node_id IN ('ctx_hq_delivery','ctx_dev_delivery')")
+        conn.execute("UPDATE panky_context_nodes SET delivery_repository=%s,"
+                     "delivery_store_id=%s,delivery_generation=1,delivery_local_path=%s "
+                     "WHERE node_id='ctx_hq'",
+                     ("Pancracio-s/repo-hq-delivery", "hq_delivery", "domains/publications/hq"))
+    legacy = store.context_catalog(issuer="https://accounts.google.com",
+                                   subject="oidc-dev", email="dev@example.invalid")
+    legacy_nodes = {row["node_id"]: row for row in legacy["nodes"]}
+    assert legacy_nodes["ctx_hq"]["repository"] == "Pancracio-s/repo-hq-delivery"
+    assert legacy_nodes["ctx_hq"]["binding_mode"] == "generated"
 
 
 def test_gateway_to_backend_catalog_end_to_end(db, monkeypatch):

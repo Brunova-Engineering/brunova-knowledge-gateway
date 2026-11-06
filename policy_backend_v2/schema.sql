@@ -23,6 +23,7 @@ CREATE TABLE panky_context_nodes (
   store_id text NOT NULL UNIQUE,
   generation integer NOT NULL CHECK (generation > 0),
   local_path text NOT NULL UNIQUE,
+  binding_mode text NOT NULL DEFAULT 'authoritative' CHECK (binding_mode IN ('authoritative','generated')),
   delivery_repository text UNIQUE,
   delivery_store_id text UNIQUE,
   delivery_generation integer CHECK (delivery_generation > 0),
