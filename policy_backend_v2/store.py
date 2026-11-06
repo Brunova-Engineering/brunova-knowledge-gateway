@@ -76,17 +76,19 @@ class PolicyStoreV2:
                                                              row["node_id"], "read", surface)).allowed)
                     if "knowledge" not in readable:
                         continue
-                    # A downward publication is the readable backing for a
-                    # Seat that cannot mutate the department's durable node.
-                    # Never hand both Git repositories to a read-only Actor.
+                    legacy_delivery = bool(row.get("delivery_repository") and not decide(
+                        data, Request(actor["actor_id"], "context_node", row["node_id"],
+                                      "update", "knowledge")).allowed)
+                    generated = row["binding_mode"] == "generated" or legacy_delivery
+                    # Generated delivery repos contain only approved knowledge.
+                    # Durable repos also contain state and work. Read-only
+                    # recipients get their generated delivery context; the
+                    # durable checkout is only disclosed to a writer.
                     can_update = decide(data, Request(actor["actor_id"], "context_node",
                                                       row["node_id"], "update", "knowledge")).allowed
-                    use_delivery = bool(row["delivery_repository"] and not can_update)
-                    # The durable Git checkout includes all three surfaces.
-                    # A narrower read grant cannot authorize cloning it.
-                    if not use_delivery and len(readable) != 3:
+                    if not generated and (len(readable) != 3 or not can_update):
                         continue
-                    prefix = "delivery_" if use_delivery else ""
+                    prefix = "delivery_" if legacy_delivery else ""
                     if not all(row.get(f"{prefix}{key}") for key in
                                ("repository", "store_id", "generation", "local_path")):
                         raise ValueError("Active context repository projection is incomplete")
@@ -96,8 +98,8 @@ class PolicyStoreV2:
                         "store_id": row[f"{prefix}store_id"],
                         "generation": row[f"{prefix}generation"],
                         "local_path": row[f"{prefix}local_path"],
-                        "binding_mode": "generated" if use_delivery else "authoritative",
-                        "read_surfaces": ("knowledge",) if use_delivery else readable,
+                        "binding_mode": "generated" if generated else "authoritative",
+                        "read_surfaces": ("knowledge",) if generated else readable,
                     })
                 return {"status": "ready", "actor_id": actor["actor_id"],
                         "release": release["core_commit"], "nodes": nodes}
