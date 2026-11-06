@@ -77,7 +77,7 @@ def example():
         "act_dev_001": {"status": "active", "roles": ["developer"], "identities": {"google_oidc": {"email": "dev@example.invalid"}}},
     }}
     seat_by_node = {seat.context_node_id: seat.code for seat in policy.seats}
-    nodes = {n.node_id: {"parent_id": n.parent_node_id,
+    nodes = {n.node_id: {"parent_id": n.parent_node_id, "owner_class": "organization",
                          **({"seat_id": seat_by_node[n.node_id]} if n.kind == "seat" else {})}
              for n in policy.context_nodes}
     topology = {"nodes": nodes, "_seats": {
@@ -145,8 +145,33 @@ def test_http_contract_ignores_preview_flag_on_real_action(db):
         result = client.post("/v2/decide", json=body)
         assert result.status_code == 200
         assert result.json()["allowed"]
+        unknown = {**body, "resource_ref": "other_source", "request_id": "unknown"}
+        dev_unknown = client.post("/v2/decide", json=unknown)
+        assert dev_unknown.json()["allowed"] is False
+        admin_unknown = client.post("/v2/decide", json={
+            **unknown, "actor": {"issuer": "https://accounts.google.com",
+                                  "subject": "oidc-admin", "email": "jorge@example.invalid"},
+            "request_id": "admin-unknown",
+        })
+        assert admin_unknown.json()["reason"] == "super_admin"
         with psycopg.connect(db) as conn:
-            assert conn.execute("SELECT count(*) FROM panky_audit_events WHERE actor_id='act_dev_001'").fetchone()[0] == 1
+            conn.execute(
+                "UPDATE panky_resources SET status='disabled' WHERE external_ref='hq_client'"
+            )
+        disabled_child = client.post("/v2/decide", json={
+            **body,
+            "actor": {"issuer": "https://accounts.google.com",
+                      "subject": "oidc-admin", "email": "jorge@example.invalid"},
+            "resource_kind": "document", "resource_ref": "document-123",
+            "parent_source": "hq_client", "request_id": "admin-disabled-child",
+        })
+        assert disabled_child.json()["reason"] == "resource_disabled"
+        wrong_provider = client.post("/v2/decide", json={
+            **unknown, "provider": "unregistered", "request_id": "wrong-provider",
+        })
+        assert wrong_provider.json()["reason"] == "tool_unknown"
+        with psycopg.connect(db) as conn:
+            assert conn.execute("SELECT count(*) FROM panky_audit_events WHERE actor_id='act_dev_001'").fetchone()[0] == 2
         assert client.get("/v2/health").json() == {"status": "ready", "model": "2.0"}
     finally:
         app.dependency_overrides.clear()

@@ -19,7 +19,8 @@ def github_jwks() -> jwt.PyJWKClient:
     )
 
 
-def require_core_workflow(authorization: str | None = Header(default=None)) -> dict:
+def _core_workflow_claims(authorization: str | None, *, workflow: str,
+                          events: set[str]) -> dict:
     scheme, separator, token = (authorization or "").partition(" ")
     if not separator or scheme.casefold() != "bearer" or not token:
         raise HTTPException(401, "Core workflow identity is required")
@@ -36,11 +37,25 @@ def require_core_workflow(authorization: str | None = Header(default=None)) -> d
     if (str(claims.get("repository_id")) != "1391259854"
             or claims.get("repository") != "Pancracio-s/pancracio-core"
             or claims.get("ref") != "refs/heads/main"
-            or claims.get("event_name") not in {"push", "workflow_dispatch"}
+            or claims.get("event_name") not in events
             or claims.get("workflow_ref") !=
-            "Pancracio-s/pancracio-core/.github/workflows/publish-gateway-policy.yml@refs/heads/main"):
+            f"Pancracio-s/pancracio-core/.github/workflows/{workflow}@refs/heads/main"):
         raise HTTPException(403, "Core workflow is not authorized")
     return claims
+
+
+def require_core_workflow(authorization: str | None = Header(default=None)) -> dict:
+    return _core_workflow_claims(
+        authorization, workflow="publish-gateway-policy.yml",
+        events={"push", "workflow_dispatch"},
+    )
+
+
+def require_core_workflow_v2(authorization: str | None = Header(default=None)) -> dict:
+    return _core_workflow_claims(
+        authorization, workflow="publish-gateway-policy-v2.yml",
+        events={"workflow_dispatch"},
+    )
 
 
 def require_gateway(authorization: str | None = Header(default=None)) -> None:

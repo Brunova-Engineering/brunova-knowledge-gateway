@@ -33,6 +33,8 @@ def verify_core(policy: Policy, registry: dict, topology: dict) -> None:
         raise ValueError("Policy context nodes do not match protected Core")
     for node in policy.context_nodes:
         core_node = graph[node.node_id]
+        if core_node.get("owner_class") != "organization":
+            raise ValueError("Actor-private nodes cannot enter organizational policy")
         if core_node.get("parent_id") != node.parent_node_id:
             raise ValueError("Policy context parent differs from protected Core")
         if node.kind == "seat" and core_node.get("seat_id") is None:
@@ -40,15 +42,16 @@ def verify_core(policy: Policy, registry: dict, topology: dict) -> None:
         if node.kind != "seat" and core_node.get("seat_id") is not None:
             raise ValueError("Policy department node conflicts with Seat binding")
     core_seats = topology.get("_seats", {})
-    if core_seats:
-        for seat in policy.seats:
-            record = core_seats.get(seat.code)
-            if not record or record.get("status") != "active":
-                raise ValueError("Policy Seat is not active in Core")
-            if graph[seat.context_node_id].get("seat_id") != seat.code:
-                raise ValueError("Policy Seat node points to another protected Seat")
-            if set(record.get("occupied_by", [])) != set(seat.occupants):
-                raise ValueError("Seat occupants differ from protected Core")
+    active_seats = {code for code, record in core_seats.items()
+                    if record.get("status") == "active"}
+    if {seat.code for seat in policy.seats} != active_seats:
+        raise ValueError("Policy Seats do not match active protected Core Seats")
+    for seat in policy.seats:
+        record = core_seats[seat.code]
+        if graph[seat.context_node_id].get("seat_id") != seat.code:
+            raise ValueError("Policy Seat node points to another protected Seat")
+        if set(record.get("occupied_by", [])) != set(seat.occupants):
+            raise ValueError("Seat occupants differ from protected Core")
 
 
 def activate(dsn: str, policy: Policy, registry: dict, topology: dict,

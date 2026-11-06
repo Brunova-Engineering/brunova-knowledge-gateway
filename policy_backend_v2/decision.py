@@ -158,21 +158,28 @@ def decide(data: dict[str, list[dict]], request: Request, now: datetime | None =
     now = now or datetime.now(timezone.utc)
     if request.target_kind not in {"external_resource", "context_node"}:
         return Decision(False, "invalid_target")
+    actors = _lookup(data["actors"], "actor_id")
+    actor = actors.get(request.actor_id)
+    if not actor or actor["status"] != "active":
+        return Decision(False, "actor_unknown")
     if request.target_kind == "context_node":
         target = _lookup(data["context_nodes"], "node_id").get(request.target_id)
         if not target or target["lifecycle"] != "active" or request.surface is None:
             return Decision(False, "target_unavailable")
     else:
         target = _lookup(data["resources"], "resource_id").get(request.target_id)
-        if not target or target["status"] != "active" or request.surface is not None:
+        if request.surface is not None:
+            return Decision(False, "target_unavailable")
+        # The Gateway has already verified that this provider and command exist.
+        # Super admins retain the current broad Gateway catalog, including
+        # tools without a resource row. Ordinary Seats still require one.
+        if not target:
+            return Decision(True, "super_admin") if actor["super_admin"] else Decision(False, "target_unavailable")
+        if target["status"] != "active":
             return Decision(False, "target_unavailable")
         tool = _lookup(data["tools"], "tool_id").get(str(target["tool_id"]))
         if not tool or tool["status"] != "active":
             return Decision(False, "target_unavailable")
-    actors = _lookup(data["actors"], "actor_id")
-    actor = actors.get(request.actor_id)
-    if not actor or actor["status"] != "active":
-        return Decision(False, "actor_unknown")
     if actor["super_admin"]:
         return Decision(True, "super_admin")
     departments = _lookup(data["departments"], "department_id")

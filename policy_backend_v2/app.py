@@ -11,7 +11,7 @@ import yaml
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from policy_backend.service_auth import require_core_workflow, require_gateway
+from policy_backend.service_auth import require_core_workflow_v2, require_gateway
 from .decision import Request
 from .models import Policy
 from .publication import activate
@@ -84,26 +84,38 @@ def health(database: PolicyStoreV2 = Depends(store)) -> dict:
 
 def _decide_external(item: ExternalRequest, database: PolicyStoreV2) -> dict:
     with psycopg.connect(database.dsn, connect_timeout=3) as conn:
+        tool = conn.execute(
+            "SELECT tool_id FROM panky_tools WHERE provider=%s AND code=%s AND status='active'",
+            (item.provider, item.provider),
+        ).fetchone()
+        if tool is None:
+            return {"allowed": False, "reason": "tool_unknown"}
         row = conn.execute(
-            "SELECT r.resource_id FROM panky_resources r JOIN panky_tools t "
-            "ON t.tool_id=r.tool_id WHERE t.provider=%s AND t.code=%s AND t.status='active' "
-            "AND r.status='active' AND ((r.resource_kind=%s AND r.external_ref=%s) "
+            "SELECT r.resource_id FROM panky_resources r "
+            "WHERE r.tool_id=%s AND r.status='active' AND ((r.resource_kind=%s AND r.external_ref=%s) "
             "OR (r.resource_kind='source' AND r.external_ref=%s)) "
             "ORDER BY CASE WHEN r.resource_kind=%s AND r.external_ref=%s THEN 0 ELSE 1 END "
             "LIMIT 1",
-            # Tool rows model connected systems (workspace, n8n), while
-            # item.tool names a concrete Gateway command within that system.
-            (item.provider, item.provider, item.resource_kind, item.resource_ref, item.parent_source,
+            # Tool rows model connected systems; item.tool is a concrete
+            # Gateway command already checked by the Gateway catalog.
+            (tool[0], item.resource_kind, item.resource_ref, item.parent_source,
              item.resource_kind, item.resource_ref),
         ).fetchone()
-    if row is None:
-        return {"allowed": False, "reason": "resource_unknown"}
+        if conn.execute(
+            "SELECT 1 FROM panky_resources WHERE tool_id=%s AND status='disabled' "
+            "AND ((resource_kind=%s AND external_ref=%s) "
+            "OR (resource_kind='source' AND external_ref=%s))",
+            (tool[0], item.resource_kind, item.resource_ref, item.parent_source),
+        ).fetchone():
+            return {"allowed": False, "reason": "resource_disabled"}
     actor_id = database.actor_for_oidc(item.actor.issuer, item.actor.email)
     if actor_id is None:
         return {"allowed": False, "reason": "actor_unknown"}
     return database.decide(
         issuer=item.actor.issuer, subject=item.actor.subject, email=item.actor.email,
-        request=Request(actor_id, "external_resource", str(row[0]), item.operation),
+        request=Request(actor_id, "external_resource",
+                        str(row[0]) if row else f"unregistered:{item.provider}:{item.resource_kind}",
+                        item.operation),
         request_id=item.request_id, preview=item.preview,
     )
 
@@ -160,7 +172,7 @@ def complete_use(item: Completion, _: None = Depends(require_gateway),
 
 
 @app.post("/v2/releases/publish-from-core")
-def publish(item: Publication, claims: dict = Depends(require_core_workflow),
+def publish(item: Publication, claims: dict = Depends(require_core_workflow_v2),
             database: PolicyStoreV2 = Depends(store)) -> dict:
     if item.core_commit != claims.get("sha"):
         raise HTTPException(403, "Core commit does not match workflow identity")
