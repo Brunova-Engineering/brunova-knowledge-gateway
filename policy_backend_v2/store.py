@@ -82,13 +82,11 @@ class PolicyStoreV2:
                         data, Request(actor["actor_id"], "context_node", row["node_id"],
                                       "update", "knowledge")).allowed)
                     generated = row["binding_mode"] == "generated" or legacy_delivery
-                    # Generated delivery repos contain only approved knowledge.
-                    # Durable repos also contain state and work. Read-only
-                    # recipients get their generated delivery context; the
-                    # durable checkout is only disclosed to a writer.
-                    can_update = decide(data, Request(actor["actor_id"], "context_node",
-                                                      row["node_id"], "update", "knowledge")).allowed
-                    if not generated and (len(readable) != 3 or not can_update):
+                    # An authoritative checkout exposes knowledge, state and
+                    # work together. Read-only recipients may mount it only
+                    # when all three read decisions are currently allowed;
+                    # update permission is checked separately on each write.
+                    if not generated and len(readable) != 3:
                         continue
                     prefix = "delivery_" if legacy_delivery else ""
                     if not all(row.get(f"{prefix}{key}") for key in
