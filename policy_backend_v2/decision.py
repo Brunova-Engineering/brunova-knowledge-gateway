@@ -132,6 +132,9 @@ def _base_context(request: Request, seat: dict, data: dict,
         return False
     seat_node = str(seat["context_node_id"])
     seat_dept = str(seat["department_id"])
+    seats = _lookup(data["seats"], "seat_id")
+    target_seat = next((row for row in seats.values()
+                        if str(row["context_node_id"]) == request.target_id), None)
     for rule in data["context_rules"]:
         if rule["status"] != "active" or rule["surface"] != request.surface or rule["operation"] != request.operation:
             continue
@@ -142,6 +145,13 @@ def _base_context(request: Request, seat: dict, data: dict,
             if rule["target_class"] == "seat_context" and request.target_id == seat_node:
                 return True
             continue
+        if (kind == "role_in_seat" and rule["target_class"] == "seat_context"
+                and rule["scope"] == "reporting_subtree" and target_seat is not None
+                and target_seat["status"] == "active"
+                and str(target_seat["seat_id"]) != str(seat["seat_id"])
+                and _descendant_of(str(target_seat["seat_id"]), str(seat["seat_id"]),
+                                   seats, "reports_to_seat_id")):
+            return True
         if kind not in {"role_in_seat", "any_active_seat"}:
             continue
         if rule["target_class"] != "department_context" or rule["scope"] != "department_subtree":

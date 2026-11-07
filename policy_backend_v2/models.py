@@ -71,7 +71,7 @@ class ContextRule(Strict):
     subject_kind: Literal["any_active_seat", "role_in_seat", "seat_occupant"]
     role: str | None = None
     target_class: Literal["department_context", "seat_context"]
-    scope: Literal["department_subtree", "own_seat"]
+    scope: Literal["department_subtree", "own_seat", "reporting_subtree"]
     surface: Literal["shared", "knowledge", "state", "work", "contributions"]
     operation: str
 
@@ -193,6 +193,10 @@ class Policy(Strict):
                 raise ValueError("Context rule role mismatch")
             if rule.role and rule.role not in roles:
                 raise ValueError("Context rule role is unknown")
+            if rule.scope == "reporting_subtree" and (
+                    rule.subject_kind != "role_in_seat" or rule.target_class != "seat_context"
+                    or rule.operation != "read"):
+                raise ValueError("Reporting subtree only grants role-scoped Seat reads")
         targets = {"external_resource": resources, "context_node": nodes}
         subjects = {"actor": actors, "seat": seats, "role": roles, "department": departments}
         for grant in self.grants:
