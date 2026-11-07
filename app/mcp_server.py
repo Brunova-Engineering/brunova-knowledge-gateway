@@ -7,6 +7,7 @@ import os
 import re
 import time
 import asyncio
+from contextvars import ContextVar
 from uuid import uuid4
 from collections.abc import Callable
 from typing import Any, Literal, TypeVar
@@ -148,6 +149,9 @@ from app.visual_assets import (
 
 T = TypeVar("T")
 MCP_DOCUMENT_RESULT_LIMIT = 20
+_panky_list_sources_scope: ContextVar[frozenset[str] | None] = ContextVar(
+    "panky_list_sources_scope", default=None
+)
 
 
 class SourceListToolResult(BaseModel):
@@ -449,6 +453,8 @@ class BrunovaMCPServer(MCPServer):
             issuer="https://accounts.google.com",
             subject=principal.oidc_subject, email=principal.oidc_email,
         )
+        if name == "list_sources":
+            return await self._panky_list_sources(arguments, context, identity)
         reservations: list[tuple[str, str]] = []
         try:
             decision = await asyncio.to_thread(
@@ -515,6 +521,44 @@ class BrunovaMCPServer(MCPServer):
                 "uncertain" if result.is_error else "committed",
             )
         return result
+
+    async def _panky_list_sources(
+        self,
+        arguments: dict[str, Any],
+        context: Context | None,
+        identity: PankyIdentity,
+    ) -> CallToolResult:
+        """Authorize discovery against each readable source, never a global tool."""
+        try:
+            registry = get_runtime_gateway().registry
+            candidates = [source for source in registry.sources
+                          if source.status.value == "active" and source.capabilities.read]
+            requests = [{
+                "actor": {"issuer": identity.issuer, "subject": identity.subject,
+                          "email": identity.email},
+                "provider": "workspace", "tool": "list_sources",
+                "resource_kind": "source", "resource_ref": source.id,
+                "operation": "read", "request_id": f"list_sources:{uuid4()}",
+                "preview": True,
+            } for source in candidates]
+            decisions = await asyncio.to_thread(preview_policy_decisions, requests) if requests else []
+        except PankyBridgeError:
+            return CallToolResult(
+                content=[TextContent(type="text", text="policy_unavailable: Authorization could not be verified.")],
+                is_error=True,
+            )
+        allowed = frozenset(source.id for source, decision in zip(candidates, decisions)
+                            if decision["allowed"])
+        if not allowed:
+            return CallToolResult(
+                content=[TextContent(type="text", text="policy_denied: The requested operation is not authorized.")],
+                is_error=True,
+            )
+        scope = _panky_list_sources_scope.set(allowed)
+        try:
+            return await self._call_tool_impl("list_sources", arguments, context)
+        finally:
+            _panky_list_sources_scope.reset(scope)
 
     async def _call_tool_impl(
         self,
@@ -1069,7 +1113,9 @@ def list_sources(ctx: Context) -> SourceListToolResult:
                 for source in list_registered_sources(runtime.registry)
                 if active_principal().type == "management"
                 or (
-                    active_principal().allows_source(source.id)
+                    (source.id in (_panky_list_sources_scope.get() or frozenset())
+                     if active_principal().type == "panky"
+                     else active_principal().allows_source(source.id))
                     and source.status.value == "active"
                     and source.capabilities.read
                 )
