@@ -7,6 +7,7 @@ import os
 import re
 import time
 import asyncio
+from dataclasses import replace
 from uuid import uuid4
 from collections.abc import Callable
 from typing import Any, Literal, TypeVar
@@ -54,6 +55,8 @@ from app.auth.principals import (
     CapabilityScope,
     active_principal,
     authorize_workspace_operation,
+    bind_principal,
+    reset_principal,
 )
 from app.auth.panky_bridge import (
     PankyBridgeError, PankyIdentity,
@@ -450,23 +453,50 @@ class BrunovaMCPServer(MCPServer):
             subject=principal.oidc_subject, email=principal.oidc_email,
         )
         reservations: list[tuple[str, str]] = []
+        source_catalog_scope: frozenset[str] | None = None
         try:
-            decision = await asyncio.to_thread(
-                policy_decision, identity, provider=provider, tool=policy_tool,
-                resource_kind=resource_kind, resource_ref=resource_ref,
-                operation=operation, request_id=request_id,
-                parent_source=source_id if resource_kind == "document" else None,
-            )
-            if (not decision["allowed"] or
-                    (name in MANAGEMENT_ONLY_TOOLS
-                     and decision.get("reason") != "super_admin"
-                     and decision.get("grant_tool") != name)):
-                return CallToolResult(
-                    content=[TextContent(type="text", text="policy_denied: The requested operation is not authorized.")],
-                    is_error=True,
+            if name == "list_sources":
+                # Discovery advertises this aggregate using source-scoped
+                # reads. Authorize those same targets, not a fictitious global
+                # tool resource, and narrow the listing to the allowed IDs.
+                allowed_sources: set[str] = set()
+                for source in get_runtime_gateway().registry.sources:
+                    if (source.status.value != "active" or not source.capabilities.read
+                            or not principal.allows_source(source.id)):
+                        continue
+                    use_request = str(uuid4())
+                    decision = await asyncio.to_thread(
+                        policy_decision, identity, provider="workspace", tool=name,
+                        resource_kind="source", resource_ref=source.id,
+                        operation="read", request_id=use_request,
+                    )
+                    if decision["allowed"]:
+                        allowed_sources.add(source.id)
+                        if decision.get("reservation_id"):
+                            reservations.append((decision["reservation_id"], use_request))
+                if not allowed_sources:
+                    return CallToolResult(
+                        content=[TextContent(type="text", text="policy_denied: The requested operation is not authorized.")],
+                        is_error=True,
+                    )
+                source_catalog_scope = frozenset(allowed_sources)
+            else:
+                decision = await asyncio.to_thread(
+                    policy_decision, identity, provider=provider, tool=policy_tool,
+                    resource_kind=resource_kind, resource_ref=resource_ref,
+                    operation=operation, request_id=request_id,
+                    parent_source=source_id if resource_kind == "document" else None,
                 )
-            if decision.get("reservation_id"):
-                reservations.append((decision["reservation_id"], request_id))
+                if (not decision["allowed"] or
+                        (name in MANAGEMENT_ONLY_TOOLS
+                         and decision.get("reason") != "super_admin"
+                         and decision.get("grant_tool") != name)):
+                    return CallToolResult(
+                        content=[TextContent(type="text", text="policy_denied: The requested operation is not authorized.")],
+                        is_error=True,
+                    )
+                if decision.get("reservation_id"):
+                    reservations.append((decision["reservation_id"], request_id))
             # A move crosses two sources. Both must be authorized before work.
             destination = arguments.get("destination_source_id")
             if provider == "workspace" and isinstance(destination, str) and destination:
@@ -501,6 +531,8 @@ class BrunovaMCPServer(MCPServer):
                 content=[TextContent(type="text", text="policy_unavailable: Authorization could not be verified.")],
                 is_error=True,
             )
+        source_binding = (bind_principal(replace(principal, sources=source_catalog_scope))
+                          if source_catalog_scope is not None else None)
         try:
             result = await self._call_tool_impl(name, arguments, context)
         except Exception:
@@ -509,6 +541,9 @@ class BrunovaMCPServer(MCPServer):
                     complete_policy_use, reservation, use_request, "uncertain"
                 )
             raise
+        finally:
+            if source_binding is not None:
+                reset_principal(source_binding)
         for reservation, use_request in reservations:
             await asyncio.to_thread(
                 complete_policy_use, reservation, use_request,
