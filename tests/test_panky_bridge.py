@@ -17,6 +17,7 @@ from app.auth.principals import Principal, bind_principal, reset_principal
 from app.mcp_server import mcp_server
 from mcp.types import CallToolResult, TextContent
 from mcp.types import Tool as MCPTool
+from app.source_registry import SourceDefinition, SourceRegistry, SourceRegistryDocument
 
 
 def test_legacy_management_token_is_unchanged_when_bridge_is_on(monkeypatch):
@@ -147,6 +148,66 @@ def test_catalog_hides_ungranted_tools(monkeypatch):
     principal = Principal.panky(subject="fixture-sub", email="dev@example.com")
     visible = asyncio.run(mcp_server._panky_catalog(tools, principal))
     assert [tool.name for tool in visible] == ["retrieve_document"]
+
+
+def test_list_sources_uses_source_read_policy_and_filters_result(monkeypatch):
+    def source(source_id, *, read=True):
+        return SourceDefinition.model_validate({
+            "id": source_id, "name": source_id, "system": "google_workspace",
+            "location_type": "folder", "location_id": f"folder_{source_id}",
+            "classification": "management_only", "owner": ["Management"],
+            "status": "active", "capabilities": {"read": read},
+        })
+
+    registry = SourceRegistry(SourceRegistryDocument(version=1, sources=(
+        source("allowed"), source("denied"), source("not_readable", read=False),
+    )))
+    monkeypatch.setattr("app.mcp_server.get_runtime_gateway",
+                        lambda: SimpleNamespace(registry=registry))
+    monkeypatch.setattr("app.mcp_server.emit_audit_record", lambda **kwargs: None)
+    monkeypatch.setattr("app.mcp_server._mcp_request_id", lambda context: "synthetic-request")
+    seen = []
+
+    def preview(requests):
+        seen.extend(requests)
+        return [{"allowed": request["resource_ref"] == "allowed"} for request in requests]
+
+    monkeypatch.setattr("app.mcp_server.preview_policy_decisions", preview)
+    monkeypatch.setattr("app.mcp_server.policy_decision",
+                        lambda *args, **kwargs: pytest.fail("global policy decision called"))
+    binding = bind_principal(Principal.panky(subject="fixture-sub", email="dev@example.com"))
+    try:
+        result = asyncio.run(mcp_server.call_tool("list_sources", {}))
+    finally:
+        reset_principal(binding)
+
+    assert not result.is_error
+    assert [source["id"] for source in result.structured_content["sources"]] == ["allowed"]
+    assert {request["resource_ref"] for request in seen} == {"allowed", "denied"}
+    assert all(request["resource_kind"] == "source" and request["operation"] == "read"
+               for request in seen)
+
+
+def test_list_sources_denies_when_no_source_is_readable(monkeypatch):
+    registry = SourceRegistry(SourceRegistryDocument(version=1, sources=(
+        SourceDefinition.model_validate({
+            "id": "denied", "name": "Denied", "system": "google_workspace",
+            "location_type": "folder", "location_id": "folder_denied",
+            "classification": "management_only", "owner": ["Management"],
+            "status": "active", "capabilities": {"read": True},
+        }),
+    )))
+    monkeypatch.setattr("app.mcp_server.get_runtime_gateway",
+                        lambda: SimpleNamespace(registry=registry))
+    monkeypatch.setattr("app.mcp_server.preview_policy_decisions",
+                        lambda requests: [{"allowed": False} for _ in requests])
+    binding = bind_principal(Principal.panky(subject="fixture-sub", email="dev@example.com"))
+    try:
+        result = asyncio.run(mcp_server.call_tool("list_sources", {}))
+    finally:
+        reset_principal(binding)
+    assert result.is_error
+    assert "policy_denied" in result.content[0].text
 
 
 def test_policy_allowed_panky_can_read_acquisition_without_widening_developer(monkeypatch):
