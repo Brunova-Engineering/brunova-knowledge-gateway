@@ -133,7 +133,9 @@ def test_catalog_follows_release_and_oidc_scope(db):
     assert visible["ctx_hq_delivery"]["repository"] == "Pancracio-s/repo-hq-delivery"
     assert visible["ctx_hq_delivery"]["binding_mode"] == "generated"
     assert visible["ctx_dev_delivery"]["binding_mode"] == "generated"
-    assert "ctx_hq" not in visible
+    assert visible["ctx_hq"]["repository"] == "Pancracio-s/repo-ctx_hq"
+    assert visible["ctx_hq"]["binding_mode"] == "authoritative"
+    assert visible["ctx_hq"]["read_surfaces"] == ("knowledge", "state", "work")
     nat = store.context_catalog(issuer="https://accounts.google.com",
                                 subject="oidc-nat", email="nat@example.invalid")
     nat_nodes = {row["node_id"]: row for row in nat["nodes"]}
