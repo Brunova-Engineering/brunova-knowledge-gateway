@@ -159,6 +159,15 @@ class SourceListToolResult(BaseModel):
     request_id: str
 
 
+class WorkspaceAuthorizationToolResult(BaseModel):
+    source_id: str
+    tool_name: str
+    operation: str
+    allowed: bool
+    reason: Literal["allowed", "policy_denied", "source_capability_denied", "source_unavailable"]
+    request_id: str
+
+
 class DocumentListToolResult(BaseModel):
     documents: list[DriveFile]
     request_id: str
@@ -374,8 +383,11 @@ class BrunovaMCPServer(MCPServer):
         except Exception:
             return []
         entries: list[tuple[str, dict]] = []
+        introspection_tools = {"check_workspace_authorization"}
         for tool in tools:
             name = tool.name
+            if name in introspection_tools:
+                continue
             provider = _tool_provider(name)
             capability = TOOL_CAPABILITIES.get(name)
             if provider == "workspace" and capability:
@@ -396,7 +408,7 @@ class BrunovaMCPServer(MCPServer):
                     ),
                     "request_id": f"catalog:{uuid4()}", "preview": True,
                 }))
-        allowed: set[str] = set()
+        allowed: set[str] = introspection_tools & {tool.name for tool in tools}
         try:
             for start in range(0, len(entries), 25):
                 chunk = entries[start:start + 25]
@@ -455,6 +467,8 @@ class BrunovaMCPServer(MCPServer):
         )
         if name == "list_sources":
             return await self._panky_list_sources(arguments, context, identity)
+        if name == "check_workspace_authorization":
+            return await self._call_tool_impl(name, arguments, context)
         reservations: list[tuple[str, str]] = []
         try:
             decision = await asyncio.to_thread(
@@ -796,6 +810,7 @@ SIGNAL_WORKER_TOOLS = {
 }
 
 TOOL_CAPABILITIES: dict[str, str] = {
+    "check_workspace_authorization": "read",
     "list_sources": "read",
     "resolve_source_artifact": "read",
     "inspect_document_structure": "read",
@@ -884,6 +899,8 @@ def _principal_can_see_tool(
 
 
 def _tool_authorization_error(principal: Any, name: str) -> str | None:
+    if name == "check_workspace_authorization":
+        return None if principal.type == "panky" else "tool_denied"
     if principal.type == "panky":
         return None
     if name.startswith("acquisition_"):
@@ -1098,6 +1115,58 @@ def _execute_tool(
             asset_refs=asset_refs,
         )
         raise
+
+
+@mcp_server.tool()
+def check_workspace_authorization(
+    source_id: str,
+    tool_name: str,
+    ctx: Context,
+) -> WorkspaceAuthorizationToolResult:
+    """Preview a specific Workspace tool against one source without touching data."""
+
+    def check(runtime: KnowledgeRuntime, request_id: str) -> WorkspaceAuthorizationToolResult:
+        principal = active_principal()
+        if principal.type != "panky" or not principal.oidc_subject or not principal.oidc_email:
+            raise WorkspaceAdapterError("tool_denied", "The requested operation is not authorized.", 403)
+        operation = TOOL_CAPABILITIES.get(tool_name)
+        if (not operation or _tool_provider(tool_name) != "workspace"
+                or tool_name in {"list_sources", "check_workspace_authorization"}):
+            raise WorkspaceAdapterError("tool_denied", "The requested operation is not authorized.", 403)
+        source = next((item for item in runtime.registry.sources if item.id == source_id), None)
+        if source is None or source.status.value != "active":
+            allowed, reason = False, "source_unavailable"
+        elif not bool(getattr(source.capabilities, operation, False)):
+            allowed, reason = False, "source_capability_denied"
+        else:
+            request = {
+                "actor": {"issuer": "https://accounts.google.com",
+                          "subject": principal.oidc_subject, "email": principal.oidc_email},
+                "provider": "workspace", "tool": tool_name, "resource_kind": "source",
+                "resource_ref": source_id, "operation": operation,
+                "request_id": f"authorization_preview:{request_id}", "preview": True,
+            }
+            try:
+                decision = preview_policy_decisions([request])[0]
+            except PankyBridgeError:
+                raise WorkspaceAdapterError(
+                    "policy_unavailable", "Authorization could not be verified.", 503
+                ) from None
+            allowed = decision["allowed"] and (
+                tool_name not in MANAGEMENT_ONLY_TOOLS
+                or decision.get("reason") == "super_admin"
+                or decision.get("grant_tool") == tool_name
+            )
+            reason = "allowed" if allowed else "policy_denied"
+        return WorkspaceAuthorizationToolResult(
+            source_id=source_id, tool_name=tool_name, operation=operation, allowed=allowed,
+            reason=reason, request_id=request_id,
+        )
+
+    return _execute_tool(
+        ctx=ctx, action="check_workspace_authorization", operation=check,
+        resource_id=source_id, resource_type="source_registry",
+    )
 
 
 @mcp_server.tool()

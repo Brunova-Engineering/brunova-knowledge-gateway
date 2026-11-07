@@ -210,6 +210,64 @@ def test_list_sources_denies_when_no_source_is_readable(monkeypatch):
     assert "policy_denied" in result.content[0].text
 
 
+def test_workspace_authorization_preview_is_read_only_and_checks_effective_access(monkeypatch):
+    source = SourceDefinition.model_validate({
+        "id": "hq_client", "name": "HQ", "system": "google_workspace",
+        "location_type": "folder", "location_id": "hq_folder_12345",
+        "classification": "management_only", "owner": ["Management"],
+        "status": "active", "capabilities": {"read": True, "delete": True, "share": False},
+    })
+    registry = SourceRegistry(SourceRegistryDocument(version=1, sources=(source,)))
+    monkeypatch.setattr("app.mcp_server.get_runtime_gateway",
+                        lambda: SimpleNamespace(registry=registry))
+    monkeypatch.setattr("app.mcp_server.emit_audit_record", lambda **kwargs: None)
+    monkeypatch.setattr("app.mcp_server._mcp_request_id", lambda context: "preview-test")
+    monkeypatch.setattr("app.mcp_server.policy_decision",
+                        lambda *args, **kwargs: pytest.fail("mutating policy decision called"))
+    seen = []
+
+    def preview(requests):
+        seen.extend(requests)
+        return [{"allowed": request["operation"] == "read"} for request in requests]
+
+    monkeypatch.setattr("app.mcp_server.preview_policy_decisions", preview)
+    binding = bind_principal(Principal.panky(subject="fixture-sub", email="dev@example.com"))
+    try:
+        read = asyncio.run(mcp_server.call_tool(
+            "check_workspace_authorization", {"source_id": "hq_client", "tool_name": "list_source_documents"}))
+        delete = asyncio.run(mcp_server.call_tool(
+            "check_workspace_authorization", {"source_id": "hq_client", "tool_name": "delete_source_artifact"}))
+        share = asyncio.run(mcp_server.call_tool(
+            "check_workspace_authorization", {"source_id": "hq_client", "tool_name": "share_source_artifact"}))
+        outside = asyncio.run(mcp_server.call_tool(
+            "check_workspace_authorization", {"source_id": "outside", "tool_name": "list_source_documents"}))
+        catalog = asyncio.run(mcp_server._panky_catalog(
+            [MCPTool(name="check_workspace_authorization", description="Preview", input_schema={"type": "object"})],
+            Principal.panky(subject="fixture-sub", email="dev@example.com")))
+    finally:
+        reset_principal(binding)
+
+    assert read.structured_content["allowed"] is True
+    assert read.structured_content["reason"] == "allowed"
+    assert delete.structured_content["allowed"] is False
+    assert delete.structured_content["reason"] == "policy_denied"
+    assert share.structured_content["allowed"] is False
+    assert share.structured_content["reason"] == "source_capability_denied"
+    assert outside.structured_content["allowed"] is False
+    assert outside.structured_content["reason"] == "source_unavailable"
+    assert [item["operation"] for item in seen] == ["read", "delete"]
+    assert [item["tool"] for item in seen] == ["list_source_documents", "delete_source_artifact"]
+    assert all(item["preview"] is True and item["resource_kind"] == "source"
+               for item in seen)
+    assert [tool.name for tool in catalog] == ["check_workspace_authorization"]
+
+
+def test_workspace_authorization_preview_is_hidden_from_legacy_principals():
+    from app.mcp_server import _tool_authorization_error
+
+    assert _tool_authorization_error(Principal.management(), "check_workspace_authorization") == "tool_denied"
+
+
 def test_policy_allowed_panky_can_read_acquisition_without_widening_developer(monkeypatch):
     import httpx
     from app import acquisition
