@@ -116,7 +116,7 @@ CREATE TABLE panky_context_rules (
   role_id uuid REFERENCES panky_roles(role_id),
   target_class text NOT NULL CHECK (target_class IN
     ('department_context','seat_context')),
-  scope text NOT NULL CHECK (scope IN ('department_subtree','own_seat')),
+  scope text NOT NULL CHECK (scope IN ('department_subtree','own_seat','reporting_subtree')),
   surface text NOT NULL CHECK (surface IN ('shared','knowledge','state','work','contributions')),
   operation text NOT NULL,
   status text NOT NULL CHECK (status IN ('active','disabled')),

@@ -30,7 +30,7 @@ def fixture():
         ],
         "seats": [
             {"seat_id": "s_nat", "code": "management_01", "department_id": "management", "role_id": "manager", "context_node_id": "ctx_root", "status": "active"},
-            {"seat_id": "s_dev", "code": "dev_01", "department_id": "hq", "role_id": "developer", "context_node_id": "ctx_dev", "status": "active"},
+            {"seat_id": "s_dev", "code": "dev_01", "department_id": "hq", "role_id": "developer", "context_node_id": "ctx_dev", "reports_to_seat_id": "s_nat", "status": "active"},
             {"seat_id": "s_finance", "code": "finance_contributor", "department_id": "finance", "role_id": "contributor", "context_node_id": "ctx_finance_seat", "status": "active"},
         ],
         "actor_seats": [
@@ -63,8 +63,10 @@ def fixture():
         ],
         "context_rules": [
             {"subject_kind": "any_active_seat", "role_id": None, "target_class": "department_context", "scope": "department_subtree", "surface": "shared", "operation": "read", "status": "active"},
+            {"subject_kind": "any_active_seat", "role_id": None, "target_class": "department_context", "scope": "department_subtree", "surface": "knowledge", "operation": "read", "status": "active"},
             {"subject_kind": "role_in_seat", "role_id": "manager", "target_class": "department_context", "scope": "department_subtree", "surface": "work", "operation": "assign", "status": "active"},
             {"subject_kind": "role_in_seat", "role_id": "manager", "target_class": "department_context", "scope": "department_subtree", "surface": "knowledge", "operation": "update", "status": "active"},
+            {"subject_kind": "role_in_seat", "role_id": "manager", "target_class": "seat_context", "scope": "reporting_subtree", "surface": "knowledge", "operation": "read", "status": "active"},
             {"subject_kind": "seat_occupant", "role_id": None, "target_class": "seat_context", "scope": "own_seat", "surface": "knowledge", "operation": "update", "status": "active"},
         ],
         "grants": [],
@@ -76,6 +78,16 @@ def test_parent_manager_can_assign_and_enrich_child_context():
     assert decide(data, Request("nat", "context_node", "ctx_hq", "assign", "work"), NOW).allowed
     assert decide(data, Request("nat", "context_node", "ctx_runbook", "update", "knowledge"), NOW).allowed
     assert not decide(data, Request("nat", "context_node", "ctx_hq", "delete", "knowledge"), NOW).allowed
+
+
+def test_direct_hq_read_is_not_hq_write_and_manager_sees_reporting_seat():
+    data = fixture()
+    assert decide(data, Request("dev", "context_node", "ctx_hq", "read", "knowledge"), NOW).allowed
+    assert not decide(data, Request("dev", "context_node", "ctx_hq", "update", "knowledge"), NOW).allowed
+    assert decide(data, Request("dev", "context_node", "ctx_dev", "update", "knowledge"), NOW).allowed
+    assert decide(data, Request("nat", "context_node", "ctx_dev", "read", "knowledge"), NOW).allowed
+    assert not decide(data, Request("nat", "context_node", "ctx_dev", "update", "knowledge"), NOW).allowed
+    assert not decide(data, Request("nat", "context_node", "ctx_finance_seat", "read", "knowledge"), NOW).allowed
 
 
 def test_two_seats_do_not_mix_role_and_department():
