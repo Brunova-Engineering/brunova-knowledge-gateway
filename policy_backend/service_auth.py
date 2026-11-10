@@ -58,6 +58,13 @@ def require_core_workflow_v2(authorization: str | None = Header(default=None)) -
     )
 
 
+def require_core_governance_workflow(authorization: str | None = Header(default=None)) -> dict:
+    return _core_workflow_claims(
+        authorization, workflow="governance-policy-sync.yml",
+        events={"workflow_dispatch", "schedule"},
+    )
+
+
 def require_gateway(authorization: str | None = Header(default=None)) -> None:
     audience = os.environ.get("PANKY_POLICY_AUDIENCE", "")
     gateway_email = os.environ.get("PANKY_GATEWAY_SERVICE_ACCOUNT", "")

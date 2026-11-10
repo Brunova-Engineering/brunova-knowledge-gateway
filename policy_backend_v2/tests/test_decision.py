@@ -124,3 +124,30 @@ def test_own_seat_context_mutates_but_others_do_not():
 def test_super_admin_is_tenant_internal_bypass():
     data = fixture()
     assert decide(data, Request("jorge", "external_resource", "hq_drive", "delete"), NOW).reason == "super_admin"
+
+
+def test_owned_resource_is_private_to_owner_seat_and_ancestor_admin_until_granted():
+    data = fixture()
+    for seat in data["seats"]:
+        seat["seat_type"] = "admin" if seat["seat_id"] == "s_nat" else "basic"
+    data["resources"][0]["owner_seat_id"] = "s_dev"
+    data["actors"].append({"actor_id": "peer", "status": "active", "super_admin": False})
+    data["seats"].append({"seat_id": "s_peer", "code": "hq_peer", "department_id": "hq",
+                          "role_id": "developer", "context_node_id": "ctx_peer",
+                          "seat_type": "basic", "status": "active"})
+    data["actor_seats"].append({"actor_id": "peer", "seat_id": "s_peer",
+                                "active_from": NOW, "active_until": None})
+    read = Request("peer", "external_resource", "hq_drive", "read")
+    assert not decide(data, read, NOW).allowed
+    assert decide(data, Request("dev", "external_resource", "hq_drive", "read"), NOW).seat_id == "s_dev"
+    assert decide(data, Request("nat", "external_resource", "hq_drive", "read"), NOW).seat_id == "s_nat"
+    data["grants"].append({"grant_id": "share-peer", "release_id": "release-2",
+                           "subject_kind": "seat", "seat_id": "s_peer",
+                           "target_kind": "external_resource", "resource_id": "hq_drive",
+                           "operation": "read", "effect": "allow", "valid_from": NOW})
+    assert decide(data, read, NOW).grant_id == "share-peer"
+    data["grants"].append({"grant_id": "bad-delete", "release_id": "release-2",
+                           "subject_kind": "seat", "seat_id": "s_peer",
+                           "target_kind": "external_resource", "resource_id": "hq_drive",
+                           "operation": "delete", "effect": "allow", "valid_from": NOW})
+    assert not decide(data, Request("peer", "external_resource", "hq_drive", "delete"), NOW).allowed

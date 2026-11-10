@@ -402,10 +402,7 @@ class BrunovaMCPServer(MCPServer):
                 entries.append((name, {
                     "actor": actor, "provider": provider, "tool": name,
                     "resource_kind": kind, "resource_ref": reference,
-                    "operation": capability or (
-                        "call" if provider in {"n8n", "hubspot", "openwa"}
-                        else "read"
-                    ),
+                    "operation": _panky_operation(name, provider, capability),
                     "request_id": f"catalog:{uuid4()}", "preview": True,
                 }))
         allowed: set[str] = introspection_tools & {tool.name for tool in tools}
@@ -453,9 +450,7 @@ class BrunovaMCPServer(MCPServer):
             resource_ref = str(arguments.get("sessionId") or "*")
         else:
             resource_kind, resource_ref = "tool", name
-        operation = TOOL_CAPABILITIES.get(name) or (
-            "call" if provider in {"n8n", "hubspot", "openwa"} else "read"
-        )
+        operation = _panky_operation(name, provider, TOOL_CAPABILITIES.get(name))
         policy_tool = (
             str(arguments.get("tool_name"))
             if name == "n8n_instance_call_tool" and arguments.get("tool_name")
@@ -848,6 +843,17 @@ N8N_ROUTED_TOOLS = frozenset({
     "n8n_instance_call_tool",
 })
 N8N_STATIC_TOOLS = N8N_ROUTED_TOOLS | {"n8n_status", "n8n_list_tools"}
+
+
+def _panky_operation(name: str, provider: str, capability: str | None) -> str:
+    if capability:
+        return capability
+    if provider == "n8n" and (
+        name == "n8n_instance_call_tool"
+        or (name.startswith("n8n_") and name not in N8N_STATIC_TOOLS)
+    ):
+        return "execute"
+    return "call" if provider in {"n8n", "hubspot", "openwa"} else "read"
 
 
 def _tool_provider(name: str) -> str:

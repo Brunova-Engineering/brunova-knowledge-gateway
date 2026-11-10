@@ -11,11 +11,13 @@ import yaml
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from policy_backend.service_auth import require_core_workflow_v2, require_gateway
+from policy_backend.service_auth import (require_core_workflow_v2,
+                                         require_core_governance_workflow, require_gateway)
 from .decision import Request
 from .models import Policy
-from .publication import activate
+from .publication import activate, stable
 from .store import PolicyStoreV2
+from .governance import GovernanceStore
 
 
 app = FastAPI(title="Panky 2.0 policy backend", docs_url=None, redoc_url=None)
@@ -62,12 +64,70 @@ class Publication(BaseModel):
     seats_yaml: str = Field(min_length=1, max_length=500_000)
 
 
+class ShareRequest(BaseModel):
+    actor: ActorProof
+    resource_id: str
+    target_department_id: str
+    via_seat_id: str
+    reason: str = Field(min_length=3, max_length=1000)
+
+
+class ShareDecision(BaseModel):
+    actor: ActorProof
+    request_id: UUID
+    via_seat_id: str
+    accept: bool
+
+
+class FounderTransferRequest(BaseModel):
+    actor: ActorProof
+    target_actor_id: str = Field(min_length=1)
+    deadline_hours: int = Field(default=72, ge=1, le=168)
+
+
+class FounderTransferDecision(BaseModel):
+    actor: ActorProof
+    transfer_id: UUID
+    accept: bool
+
+
+class SuperAdminChange(BaseModel):
+    actor: ActorProof
+    target_actor_id: str = Field(min_length=1)
+    action: str
+    reason: str = Field(min_length=3, max_length=1000)
+
+
+class ResourceGrantRequest(BaseModel):
+    actor: ActorProof
+    resource_id: str
+    recipient_seat_id: str
+    via_seat_id: str
+    operation: str = Field(min_length=1)
+    reason: str = Field(min_length=3, max_length=1000)
+
+
+class ResourceSharingQuery(BaseModel):
+    actor: ActorProof
+    resource_id: str
+    via_seat_id: str
+
+
 @lru_cache
 def store() -> PolicyStoreV2:
     dsn = os.getenv("PANKY_POLICY_V2_DSN", "")
     if not dsn:
         raise RuntimeError("Panky 2.0 policy database is not configured")
     return PolicyStoreV2(dsn)
+
+
+def _reference(kind: str, value: str) -> UUID:
+    if not value or len(value) > 128:
+        raise ValueError("invalid_reference")
+    try:
+        return UUID(value)
+    except ValueError:
+        return stable(kind, value)
 
 
 @app.get("/v2/health")
@@ -169,6 +229,143 @@ def context_catalog(item: ActorProof, _: None = Depends(require_gateway),
                                         email=item.email)
     except Exception:
         raise HTTPException(503, "Context catalog is unavailable") from None
+
+
+@app.post("/v2/governance/inbox")
+def governance_inbox(item: ActorProof, _: None = Depends(require_gateway),
+                     database: PolicyStoreV2 = Depends(store)) -> dict:
+    try:
+        return GovernanceStore(database.dsn).inbox(
+            issuer=item.issuer, subject=item.subject, email=item.email)
+    except ValueError as exc:
+        raise HTTPException(403, str(exc)) from None
+    except Exception:
+        raise HTTPException(503, "Governance inbox is unavailable") from None
+
+
+@app.get("/v2/governance/approved-for-core")
+def approved_for_core(_: dict = Depends(require_core_governance_workflow),
+                      database: PolicyStoreV2 = Depends(store)) -> dict:
+    try:
+        return GovernanceStore(database.dsn).approved_for_core()
+    except Exception:
+        raise HTTPException(503, "Approved governance changes are unavailable") from None
+
+
+@app.post("/v2/governance/shares")
+def request_share(item: ShareRequest, _: None = Depends(require_gateway),
+                  database: PolicyStoreV2 = Depends(store)) -> dict:
+    try:
+        return GovernanceStore(database.dsn).request_share(
+            issuer=item.actor.issuer, subject=item.actor.subject, email=item.actor.email,
+            resource_id=_reference("resource", item.resource_id),
+            target_department_id=_reference("department", item.target_department_id),
+            via_seat_id=_reference("seat", item.via_seat_id), reason=item.reason)
+    except ValueError as exc:
+        raise HTTPException(403, str(exc)) from None
+    except Exception:
+        raise HTTPException(503, "Share request is unavailable") from None
+
+
+@app.post("/v2/governance/shares/decide")
+def decide_share(item: ShareDecision, _: None = Depends(require_gateway),
+                 database: PolicyStoreV2 = Depends(store)) -> dict:
+    try:
+        return GovernanceStore(database.dsn).decide_share(
+            issuer=item.actor.issuer, subject=item.actor.subject, email=item.actor.email,
+            request_id=item.request_id, via_seat_id=_reference("seat", item.via_seat_id),
+            accept=item.accept)
+    except ValueError as exc:
+        raise HTTPException(403, str(exc)) from None
+    except Exception:
+        raise HTTPException(503, "Share decision is unavailable") from None
+
+
+@app.post("/v2/governance/founder-transfers")
+def request_founder_transfer(item: FounderTransferRequest,
+                             _: None = Depends(require_gateway),
+                             database: PolicyStoreV2 = Depends(store)) -> dict:
+    try:
+        return GovernanceStore(database.dsn).request_founder_transfer(
+            issuer=item.actor.issuer, subject=item.actor.subject, email=item.actor.email,
+            target_actor_id=item.target_actor_id, hours=item.deadline_hours)
+    except ValueError as exc:
+        raise HTTPException(403, str(exc)) from None
+    except Exception:
+        raise HTTPException(503, "Founder transfer request is unavailable") from None
+
+
+@app.post("/v2/governance/founder-transfers/decide")
+def decide_founder_transfer(item: FounderTransferDecision,
+                            _: None = Depends(require_gateway),
+                            database: PolicyStoreV2 = Depends(store)) -> dict:
+    try:
+        return GovernanceStore(database.dsn).decide_founder_transfer(
+            issuer=item.actor.issuer, subject=item.actor.subject, email=item.actor.email,
+            transfer_id=item.transfer_id, accept=item.accept)
+    except ValueError as exc:
+        raise HTTPException(403, str(exc)) from None
+    except Exception:
+        raise HTTPException(503, "Founder transfer decision is unavailable") from None
+
+
+@app.post("/v2/governance/super-admin-changes")
+def change_super_admin(item: SuperAdminChange, _: None = Depends(require_gateway),
+                       database: PolicyStoreV2 = Depends(store)) -> dict:
+    try:
+        return GovernanceStore(database.dsn).change_super_admin(
+            issuer=item.actor.issuer, subject=item.actor.subject, email=item.actor.email,
+            target_actor_id=item.target_actor_id, action=item.action, reason=item.reason)
+    except ValueError as exc:
+        raise HTTPException(403, str(exc)) from None
+    except Exception:
+        raise HTTPException(503, "Super admin change is unavailable") from None
+
+
+@app.post("/v2/governance/resource-grants")
+def request_resource_grant(item: ResourceGrantRequest, _: None = Depends(require_gateway),
+                           database: PolicyStoreV2 = Depends(store)) -> dict:
+    try:
+        return GovernanceStore(database.dsn).request_resource_grant(
+            issuer=item.actor.issuer, subject=item.actor.subject, email=item.actor.email,
+            resource_id=_reference("resource", item.resource_id),
+            recipient_seat_id=_reference("seat", item.recipient_seat_id),
+            via_seat_id=_reference("seat", item.via_seat_id),
+            operation=item.operation, reason=item.reason)
+    except ValueError as exc:
+        raise HTTPException(403, str(exc)) from None
+    except Exception:
+        raise HTTPException(503, "Resource grant request is unavailable") from None
+
+
+@app.post("/v2/governance/resource-grants/revoke")
+def revoke_resource_grant(item: ResourceGrantRequest, _: None = Depends(require_gateway),
+                          database: PolicyStoreV2 = Depends(store)) -> dict:
+    try:
+        return GovernanceStore(database.dsn).revoke_resource_grant(
+            issuer=item.actor.issuer, subject=item.actor.subject, email=item.actor.email,
+            resource_id=_reference("resource", item.resource_id),
+            recipient_seat_id=_reference("seat", item.recipient_seat_id),
+            via_seat_id=_reference("seat", item.via_seat_id),
+            operation=item.operation, reason=item.reason)
+    except ValueError as exc:
+        raise HTTPException(403, str(exc)) from None
+    except Exception:
+        raise HTTPException(503, "Resource grant revocation is unavailable") from None
+
+
+@app.post("/v2/governance/resource-sharing")
+def resource_sharing(item: ResourceSharingQuery, _: None = Depends(require_gateway),
+                     database: PolicyStoreV2 = Depends(store)) -> dict:
+    try:
+        return GovernanceStore(database.dsn).resource_sharing(
+            issuer=item.actor.issuer, subject=item.actor.subject, email=item.actor.email,
+            resource_id=_reference("resource", item.resource_id),
+            via_seat_id=_reference("seat", item.via_seat_id))
+    except ValueError as exc:
+        raise HTTPException(403, str(exc)) from None
+    except Exception:
+        raise HTTPException(503, "Resource sharing inventory is unavailable") from None
 
 
 @app.post("/v2/uses/complete")

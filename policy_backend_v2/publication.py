@@ -18,6 +18,38 @@ def stable(kind: str, code: str):
     return uuid5(NAMESPACE, f"v2:{kind}:{code}")
 
 
+def _current_request_route(conn, actor_id: str, seat_id: UUID,
+                           department_id: UUID, *, admin: bool) -> bool:
+    """Recheck an approval against current identity, Seat, and ancestry."""
+    actor = conn.execute(
+        "SELECT status,super_admin FROM panky_actors WHERE actor_id=%s",
+        (actor_id,),
+    ).fetchone()
+    if actor is None or actor[0] != "active":
+        return False
+    if actor[1]:
+        return True
+    seat = conn.execute(
+        "SELECT s.department_id,s.seat_type FROM panky_seats s "
+        "JOIN panky_actor_seats a ON a.seat_id=s.seat_id "
+        "WHERE s.seat_id=%s AND a.actor_id=%s AND s.status='active' "
+        "AND a.active_from<=now() AND (a.active_until IS NULL OR a.active_until>now())",
+        (seat_id, actor_id),
+    ).fetchone()
+    if seat is None:
+        return False
+    if admin and seat[1] != "admin":
+        return False
+    return bool(conn.execute(
+        "WITH RECURSIVE lineage AS ("
+        "SELECT department_id,parent_department_id FROM panky_departments WHERE department_id=%s "
+        "UNION ALL SELECT d.department_id,d.parent_department_id FROM panky_departments d "
+        "JOIN lineage l ON d.department_id=l.parent_department_id) "
+        "SELECT 1 FROM lineage WHERE department_id=%s",
+        (department_id, seat[0]),
+    ).fetchone())
+
+
 def verify_core(policy: Policy, registry: dict, topology: dict) -> None:
     if policy.tenant != "brunova":
         raise ValueError("Unexpected tenant")
@@ -53,6 +85,12 @@ def verify_core(policy: Policy, registry: dict, topology: dict) -> None:
             raise ValueError("Policy Seat node points to another protected Seat")
         if set(record.get("occupied_by", [])) != set(seat.occupants):
             raise ValueError("Seat occupants differ from protected Core")
+        if policy.schema_version == 3 and seat.seat_type is None:
+            if any("super_admin" not in registered[actor_id].get("roles", [])
+                   for actor_id in seat.occupants):
+                raise ValueError("A non-super-admin cannot occupy an untyped Seat")
+    if policy.schema_version == 3 and "super_admin" not in registered[policy.founder_actor_id].get("roles", []):
+        raise ValueError("Founder must be a Core super admin")
 
 
 def _node_repository(core_node: dict) -> dict:
@@ -88,9 +126,169 @@ def activate(dsn: str, policy: Policy, registry: dict, topology: dict,
     tool_ids = [stable("tool", t.code) for t in policy.tools]
     with psycopg.connect(dsn) as conn, conn.transaction():
         conn.execute("SELECT pg_advisory_xact_lock(8642092)")
-        if conn.execute("SELECT 1 FROM panky_policy_releases WHERE core_commit=%s",
-                        (core_commit,)).fetchone():
-            raise ValueError("Core commit already activated")
+        existing_release = conn.execute(
+            "SELECT release_id,status FROM panky_policy_releases WHERE core_commit=%s",
+            (core_commit,),
+        ).fetchone()
+        if existing_release is not None:
+            if existing_release[1] == "active":
+                return str(existing_release[0])
+            raise ValueError("Core commit was already superseded")
+        active = conn.execute(
+            "SELECT release_id FROM panky_policy_releases WHERE status='active'"
+        ).fetchone()
+        accepted_shares = []
+        accepted_transfer = None
+        approved_admin_changes = []
+        approved_resource_grants = []
+        if policy.schema_version == 3 and active is not None:
+            old_admins = {row[0]: row[1] for row in conn.execute(
+                "SELECT actor_id,super_admin FROM panky_actors WHERE status='active'"
+            )}
+            registered = registry.get("actors", registry)
+            for actor_id in set(old_admins) | set(actor_ids):
+                old = old_admins.get(actor_id, False)
+                new = (actor_id in actor_ids and
+                       "super_admin" in registered[actor_id].get("roles", []))
+                if old == new:
+                    continue
+                action = "promote" if new else "revoke"
+                change = conn.execute(
+                    "SELECT change_id,requested_by_actor_id FROM panky_super_admin_changes "
+                    "WHERE target_actor_id=%s AND action=%s AND activated_release_id IS NULL "
+                    "FOR UPDATE",
+                    (actor_id, action),
+                ).fetchone()
+                if change is None:
+                    raise ValueError("Super admin change lacks governed approval")
+                requester = conn.execute(
+                    "SELECT super_admin,founder,status FROM panky_actors WHERE actor_id=%s",
+                    (change[1],),
+                ).fetchone()
+                if (requester is None or requester[2] != "active"
+                        or not requester[0] or (action == "revoke" and not requester[1])):
+                    raise ValueError("Super admin approval is no longer authoritative")
+                approved_admin_changes.append(change[0])
+            previous_founder = conn.execute(
+                "SELECT actor_id FROM panky_actors WHERE founder=true"
+            ).fetchone()
+            if previous_founder is not None and previous_founder[0] != policy.founder_actor_id:
+                accepted_transfer = conn.execute(
+                    "SELECT transfer_id FROM panky_founder_transfers "
+                    "WHERE from_actor_id=%s AND to_actor_id=%s AND status='accepted' "
+                    "AND activated_release_id IS NULL FOR UPDATE",
+                    (previous_founder[0], policy.founder_actor_id),
+                ).fetchone()
+                if accepted_transfer is None:
+                    raise ValueError("Founder change lacks accepted transfer")
+            for resource in policy.resources:
+                for target in resource.shared_departments:
+                    resource_id = stable("resource", resource.code)
+                    target_id = stable("department", target)
+                    if conn.execute(
+                        "SELECT 1 FROM panky_department_resources WHERE resource_id=%s "
+                        "AND department_id=%s AND relation='shared'",
+                        (resource_id, target_id),
+                    ).fetchone():
+                        continue
+                    approved = conn.execute(
+                        "SELECT request_id,requested_by_actor_id,requested_via_seat_id,"
+                        "decided_by_actor_id,decided_via_seat_id "
+                        "FROM panky_resource_share_requests "
+                        "WHERE resource_id=%s AND source_department_id=%s "
+                        "AND target_department_id=%s AND status='approved' "
+                        "AND activated_release_id IS NULL FOR UPDATE",
+                        (resource_id, stable("department", resource.owner_department),
+                         target_id),
+                    ).fetchone()
+                    if approved is None:
+                        raise ValueError("New department share lacks approval")
+                    if (not _current_request_route(
+                            conn, approved[1], approved[2],
+                            stable("department", resource.owner_department), admin=True)
+                            or not _current_request_route(
+                                conn, approved[3], approved[4], target_id, admin=True)):
+                        raise ValueError("Department share approval is stale")
+                    accepted_shares.append(approved[0])
+            for grant in policy.grants:
+                if grant.target_kind != "external_resource" or grant.effect != "allow":
+                    continue
+                resource_id = stable("resource", grant.target)
+                subject_id = (stable("seat", grant.subject) if grant.subject_kind == "seat"
+                              else None)
+                if subject_id is not None and conn.execute(
+                    "SELECT 1 FROM panky_grants WHERE release_id=%s AND effect='allow' "
+                    "AND target_kind='external_resource' AND subject_kind='seat' "
+                    "AND seat_id=%s AND resource_id=%s AND operation=%s",
+                    (active[0], subject_id, resource_id, grant.operation),
+                ).fetchone():
+                    continue
+                if subject_id is None:
+                    raise ValueError("New resource allow must target a Seat")
+                approval = conn.execute(
+                    "SELECT request_id,requested_by_actor_id,requested_via_seat_id "
+                    "FROM panky_resource_grant_requests "
+                    "WHERE resource_id=%s AND recipient_seat_id=%s AND operation=%s "
+                    "AND action='allow' AND requested_by_actor_id=%s "
+                    "AND activated_release_id IS NULL "
+                    "FOR UPDATE",
+                    (resource_id, subject_id, grant.operation, grant.approved_by),
+                ).fetchone()
+                if approval is None:
+                    raise ValueError("New resource grant lacks owner or admin approval")
+                owner_seat = stable("seat", next(
+                    r.owner_seat for r in policy.resources if r.code == grant.target))
+                recipient_seat = next(s for s in policy.seats if s.code == grant.subject)
+                owner_department = stable("department", next(
+                    r.owner_department for r in policy.resources if r.code == grant.target))
+                scope_department = (stable("department", recipient_seat.department)
+                                    if recipient_seat.department != next(
+                                        r.owner_department for r in policy.resources
+                                        if r.code == grant.target) else owner_department)
+                is_owner = approval[2] == owner_seat and scope_department == owner_department
+                if not _current_request_route(
+                        conn, approval[1], approval[2], scope_department,
+                        admin=not is_owner):
+                    raise ValueError("Resource grant approval is stale")
+                approved_resource_grants.append(approval[0])
+            current_allows = {
+                (row[0], row[1], row[2])
+                for row in conn.execute(
+                    "SELECT resource_id,seat_id,operation FROM panky_grants "
+                    "WHERE release_id=%s AND target_kind='external_resource' "
+                    "AND subject_kind='seat' AND effect='allow'",
+                    (active[0],),
+                )
+            }
+            next_allows = {
+                (stable("resource", grant.target), stable("seat", grant.subject),
+                 grant.operation)
+                for grant in policy.grants
+                if grant.target_kind == "external_resource" and grant.subject_kind == "seat"
+                and grant.effect == "allow"
+            }
+            for resource_id, seat_id, operation in current_allows - next_allows:
+                approval = conn.execute(
+                    "SELECT request_id,requested_by_actor_id,requested_via_seat_id "
+                    "FROM panky_resource_grant_requests WHERE resource_id=%s "
+                    "AND recipient_seat_id=%s AND operation=%s AND action='revoke' "
+                    "AND activated_release_id IS NULL FOR UPDATE",
+                    (resource_id, seat_id, operation),
+                ).fetchone()
+                if approval is None:
+                    raise ValueError("Resource grant removal lacks approval")
+                owner = conn.execute(
+                    "SELECT r.owner_seat_id,d.department_id FROM panky_resources r "
+                    "JOIN panky_department_resources d ON d.resource_id=r.resource_id "
+                    "AND d.relation='owned' WHERE r.resource_id=%s",
+                    (resource_id,),
+                ).fetchone()
+                if owner is None or not _current_request_route(
+                        conn, approval[1], approval[2], owner[1],
+                        admin=approval[2] != owner[0]):
+                    raise ValueError("Resource grant revocation approval is stale")
+                approved_resource_grants.append(approval[0])
+        conn.execute("UPDATE panky_actors SET founder=false")
         for actor in policy.actors:
             record = registry.get("actors", registry)[actor.actor_id]
             email = record["identities"]["google_oidc"]["email"].casefold()
@@ -105,6 +303,9 @@ def activate(dsn: str, policy: Policy, registry: dict, topology: dict,
             )
         conn.execute("UPDATE panky_actors SET status='disabled' WHERE NOT(actor_id=ANY(%s))",
                      (actor_ids,))
+        if policy.schema_version == 3:
+            conn.execute("UPDATE panky_actors SET founder=true WHERE actor_id=%s",
+                         (policy.founder_actor_id,))
 
         # Two-pass upserts avoid FK ordering dependencies in protected trees.
         for node in policy.context_nodes:
@@ -151,12 +352,12 @@ def activate(dsn: str, policy: Policy, registry: dict, topology: dict,
         for s in policy.seats:
             conn.execute(
                 "INSERT INTO panky_seats(seat_id,code,department_id,role_id,context_node_id,"
-                "occupancy,status) VALUES (%s,%s,%s,%s,%s,%s,'active') "
+                "seat_type,occupancy,status) VALUES (%s,%s,%s,%s,%s,%s,%s,'active') "
                 "ON CONFLICT(seat_id) DO UPDATE SET department_id=EXCLUDED.department_id,"
                 "role_id=EXCLUDED.role_id,context_node_id=EXCLUDED.context_node_id,"
-                "occupancy=EXCLUDED.occupancy,status='active'",
+                "seat_type=EXCLUDED.seat_type,occupancy=EXCLUDED.occupancy,status='active'",
                 (stable("seat", s.code), s.code, stable("department", s.department),
-                 stable("role", s.role), s.context_node_id, s.occupancy),
+                 stable("role", s.role), s.context_node_id, s.seat_type, s.occupancy),
             )
         conn.execute("UPDATE panky_seats SET status='disabled' WHERE NOT(seat_id=ANY(%s))",
                      (seat_ids,))
@@ -188,11 +389,12 @@ def activate(dsn: str, policy: Policy, registry: dict, topology: dict,
         conn.execute("UPDATE panky_resources SET status='disabled'")
         for r in policy.resources:
             conn.execute(
-                "INSERT INTO panky_resources(resource_id,tool_id,resource_kind,external_ref,status) "
-                "VALUES (%s,%s,%s,%s,'active') ON CONFLICT(resource_id) DO UPDATE SET "
-                "tool_id=EXCLUDED.tool_id,resource_kind=EXCLUDED.resource_kind,"
-                "external_ref=EXCLUDED.external_ref,status='active'",
-                (stable("resource", r.code), stable("tool", r.tool), r.resource_kind,
+                "INSERT INTO panky_resources(resource_id,code,tool_id,owner_seat_id,resource_kind,external_ref,status) "
+                "VALUES (%s,%s,%s,%s,%s,%s,'active') ON CONFLICT(resource_id) DO UPDATE SET "
+                "code=EXCLUDED.code,tool_id=EXCLUDED.tool_id,resource_kind=EXCLUDED.resource_kind,"
+                "owner_seat_id=EXCLUDED.owner_seat_id,external_ref=EXCLUDED.external_ref,status='active'",
+                (stable("resource", r.code), r.code, stable("tool", r.tool),
+                 stable("seat", r.owner_seat) if r.owner_seat else None, r.resource_kind,
                  r.external_ref),
             )
         conn.execute("DELETE FROM panky_department_resources")
@@ -222,6 +424,30 @@ def activate(dsn: str, policy: Policy, registry: dict, topology: dict,
             "INSERT INTO panky_policy_releases VALUES (%s,%s,'active',%s,%s)",
             (release_id, core_commit, at, publisher),
         )
+        if accepted_shares:
+            conn.execute(
+                "UPDATE panky_resource_share_requests SET activated_release_id=%s "
+                "WHERE request_id=ANY(%s)",
+                (release_id, accepted_shares),
+            )
+        if accepted_transfer is not None:
+            conn.execute(
+                "UPDATE panky_founder_transfers SET activated_release_id=%s "
+                "WHERE transfer_id=%s",
+                (release_id, accepted_transfer[0]),
+            )
+        if approved_admin_changes:
+            conn.execute(
+                "UPDATE panky_super_admin_changes SET activated_release_id=%s "
+                "WHERE change_id=ANY(%s)",
+                (release_id, approved_admin_changes),
+            )
+        if approved_resource_grants:
+            conn.execute(
+                "UPDATE panky_resource_grant_requests SET activated_release_id=%s "
+                "WHERE request_id=ANY(%s)",
+                (release_id, approved_resource_grants),
+            )
         for g in policy.grants:
             subject = {
                 "actor": (g.subject, None, None, None),

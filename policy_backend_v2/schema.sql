@@ -10,8 +10,10 @@ CREATE TABLE panky_actors (
   oidc_subject text,
   status text NOT NULL CHECK (status IN ('active','disabled')),
   super_admin boolean NOT NULL DEFAULT false,
+  founder boolean NOT NULL DEFAULT false CHECK (NOT founder OR (super_admin AND status = 'active')),
   UNIQUE (oidc_issuer, oidc_subject)
 );
+CREATE UNIQUE INDEX panky_one_founder ON panky_actors(founder) WHERE founder;
 
 CREATE TABLE panky_context_nodes (
   node_id text PRIMARY KEY,
@@ -58,6 +60,7 @@ CREATE TABLE panky_seats (
   role_id uuid NOT NULL REFERENCES panky_roles(role_id),
   context_node_id text NOT NULL UNIQUE REFERENCES panky_context_nodes(node_id),
   reports_to_seat_id uuid REFERENCES panky_seats(seat_id),
+  seat_type text CHECK (seat_type IN ('basic','admin')),
   occupancy text NOT NULL CHECK (occupancy IN ('single','multiple')),
   status text NOT NULL CHECK (status IN ('active','disabled')),
   CHECK (seat_id <> reports_to_seat_id)
@@ -84,11 +87,15 @@ CREATE TABLE panky_tools (
 
 CREATE TABLE panky_resources (
   resource_id uuid PRIMARY KEY,
+  code text,
   tool_id uuid NOT NULL REFERENCES panky_tools(tool_id),
+  owner_seat_id uuid REFERENCES panky_seats(seat_id),
   resource_kind text NOT NULL,
   external_ref text NOT NULL,
   status text NOT NULL CHECK (status IN ('active','disabled'))
 );
+CREATE UNIQUE INDEX panky_one_active_resource_code
+  ON panky_resources(code) WHERE status='active' AND code IS NOT NULL;
 CREATE UNIQUE INDEX panky_one_active_resource_ref
   ON panky_resources(tool_id, resource_kind, external_ref)
   WHERE status = 'active';
@@ -130,6 +137,68 @@ CREATE TABLE panky_policy_releases (
   activated_at timestamptz NOT NULL,
   published_by text NOT NULL
 );
+CREATE TABLE panky_resource_share_requests (
+  request_id uuid PRIMARY KEY,
+  resource_id uuid NOT NULL REFERENCES panky_resources(resource_id),
+  source_department_id uuid NOT NULL REFERENCES panky_departments(department_id),
+  target_department_id uuid NOT NULL REFERENCES panky_departments(department_id),
+  requested_by_actor_id text NOT NULL REFERENCES panky_actors(actor_id),
+  requested_via_seat_id uuid NOT NULL REFERENCES panky_seats(seat_id),
+  decided_by_actor_id text REFERENCES panky_actors(actor_id),
+  decided_via_seat_id uuid REFERENCES panky_seats(seat_id),
+  status text NOT NULL CHECK (status IN ('pending','approved','rejected','cancelled')),
+  reason text NOT NULL,
+  requested_at timestamptz NOT NULL,
+  decided_at timestamptz,
+  activated_release_id uuid REFERENCES panky_policy_releases(release_id),
+  CHECK (source_department_id <> target_department_id),
+  CHECK ((decided_by_actor_id IS NULL) = (decided_at IS NULL))
+);
+CREATE UNIQUE INDEX panky_one_pending_resource_share
+  ON panky_resource_share_requests(resource_id,target_department_id)
+  WHERE status IN ('pending','approved') AND activated_release_id IS NULL;
+CREATE TABLE panky_founder_transfers (
+  transfer_id uuid PRIMARY KEY,
+  from_actor_id text NOT NULL REFERENCES panky_actors(actor_id),
+  to_actor_id text NOT NULL REFERENCES panky_actors(actor_id),
+  status text NOT NULL CHECK (status IN ('pending','accepted','rejected','expired')),
+  requested_at timestamptz NOT NULL,
+  expires_at timestamptz NOT NULL,
+  decided_at timestamptz,
+  activated_release_id uuid REFERENCES panky_policy_releases(release_id),
+  CHECK (from_actor_id <> to_actor_id),
+  CHECK (expires_at > requested_at)
+);
+CREATE UNIQUE INDEX panky_one_pending_founder_transfer
+  ON panky_founder_transfers((true))
+  WHERE status IN ('pending','accepted') AND activated_release_id IS NULL;
+CREATE TABLE panky_super_admin_changes (
+  change_id uuid PRIMARY KEY,
+  target_actor_id text NOT NULL REFERENCES panky_actors(actor_id),
+  requested_by_actor_id text NOT NULL REFERENCES panky_actors(actor_id),
+  action text NOT NULL CHECK (action IN ('promote','revoke')),
+  reason text NOT NULL,
+  requested_at timestamptz NOT NULL DEFAULT now(),
+  activated_release_id uuid REFERENCES panky_policy_releases(release_id)
+);
+CREATE UNIQUE INDEX panky_one_open_super_admin_change
+  ON panky_super_admin_changes(target_actor_id,action)
+  WHERE activated_release_id IS NULL;
+CREATE TABLE panky_resource_grant_requests (
+  request_id uuid PRIMARY KEY,
+  resource_id uuid NOT NULL REFERENCES panky_resources(resource_id),
+  recipient_seat_id uuid NOT NULL REFERENCES panky_seats(seat_id),
+  operation text NOT NULL,
+  action text NOT NULL DEFAULT 'allow' CHECK (action IN ('allow','revoke')),
+  requested_by_actor_id text NOT NULL REFERENCES panky_actors(actor_id),
+  requested_via_seat_id uuid NOT NULL REFERENCES panky_seats(seat_id),
+  reason text NOT NULL,
+  requested_at timestamptz NOT NULL DEFAULT now(),
+  activated_release_id uuid REFERENCES panky_policy_releases(release_id)
+);
+CREATE UNIQUE INDEX panky_one_open_resource_grant_request
+  ON panky_resource_grant_requests(resource_id,recipient_seat_id,operation)
+  WHERE activated_release_id IS NULL;
 CREATE UNIQUE INDEX panky_one_active_v2_release ON panky_policy_releases(status)
   WHERE status = 'active';
 
