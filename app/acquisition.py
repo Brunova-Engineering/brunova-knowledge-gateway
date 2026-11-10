@@ -155,8 +155,8 @@ async def portal_request(method: str, path: str, *, params: dict | None = None,
 def register_acquisition_tools(server: Any) -> None:
     @server.tool()
     async def acquisition_get_exploration_map(cycle_id: Identifier,
-            market: Literal["MX", "US"] | None = None) -> CallToolResult:
-        """Read the current industry-to-company exploration map, company profiles, pending work and provenance. An UNVERIFIED lead is retained for follow-up and is not a verified supply-chain relationship. Management read capability only."""
+            market: Literal["MX", "US"]) -> CallToolResult:
+        """Read one market's current exploration map, company profiles, pending work and provenance. Call once for MX and once for US when both are needed; a combined map can exceed the bounded response. An UNVERIFIED lead is retained for follow-up and is not a verified supply-chain relationship."""
         return await portal_request("GET", "/exploration/map", params={"cycleId": cycle_id, "market": market})
 
     @server.tool()

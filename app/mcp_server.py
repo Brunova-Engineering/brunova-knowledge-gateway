@@ -329,11 +329,22 @@ class BrunovaMCPServer(MCPServer):
         ]
         occupied = {tool.name for tool in tools}
         if principal.type in {"management", "panky", "whatsapp_worker"}:
-            if principal.type in {"management", "panky"}:
+            # Downstream catalogs are optional. Never let either remote server
+            # consume the MCP client's entire 30-second tools/list startup.
+            async def optional_catalog(provider: str) -> list[Any]:
                 try:
-                    downstream = await get_n8n_client().list_tools()
+                    client = get_n8n_client() if provider == "n8n" else get_openwa_client()
+                    return await asyncio.wait_for(client.list_tools(), timeout=3)
                 except Exception:
-                    downstream = []
+                    return []
+
+            n8n_catalog, openwa_catalog = await asyncio.gather(
+                optional_catalog("n8n") if principal.type in {"management", "panky"}
+                else asyncio.sleep(0, result=[]),
+                optional_catalog("openwa"),
+            )
+            if principal.type in {"management", "panky"}:
+                downstream = n8n_catalog
                 for descriptor in downstream:
                     exposed_name = _downstream_exposed_name("n8n", descriptor.name, occupied)
                     occupied.add(exposed_name)
@@ -343,10 +354,7 @@ class BrunovaMCPServer(MCPServer):
                         input_schema=descriptor.input_schema,
                         _meta={**descriptor.metadata, "provider": "n8n", "downstream_tool": descriptor.name},
                     ))
-            try:
-                openwa_tools = await get_openwa_client().list_tools()
-            except Exception:
-                openwa_tools = []
+            openwa_tools = openwa_catalog
             for descriptor in openwa_tools:
                 required_operation = {"MessageHistory": "history", "ContactCheckNumber": "history", "MessageSendText": "send"}.get(descriptor.name)
                 if principal.type == "whatsapp_worker" and required_operation not in principal.whatsapp_operations:
@@ -407,19 +415,24 @@ class BrunovaMCPServer(MCPServer):
                 }))
         allowed: set[str] = introspection_tools & {tool.name for tool in tools}
         try:
-            for start in range(0, len(entries), 25):
-                chunk = entries[start:start + 25]
-                decisions = await asyncio.to_thread(
-                    preview_policy_decisions,
-                    [request for _, request in chunk],
-                )
+            # The policy API accepts up to 100 decisions per request. Preview
+            # independent batches together so tools/list cannot time out while
+            # waiting for one network round trip per small batch.
+            chunks = [entries[start:start + 100]
+                      for start in range(0, len(entries), 100)]
+            previews = await asyncio.wait_for(asyncio.gather(*(
+                asyncio.to_thread(preview_policy_decisions,
+                                  [request for _, request in chunk])
+                for chunk in chunks
+            )), timeout=21)
+            for chunk, decisions in zip(chunks, previews):
                 for (name, _), decision in zip(chunk, decisions):
                     if (decision["allowed"] and
                             (name not in MANAGEMENT_ONLY_TOOLS
                              or decision.get("reason") == "super_admin"
                              or decision.get("grant_tool") == name)):
                         allowed.add(name)
-        except PankyBridgeError:
+        except (PankyBridgeError, TimeoutError):
             return []
         return [tool for tool in tools if tool.name in allowed]
 
