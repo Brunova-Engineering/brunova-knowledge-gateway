@@ -54,7 +54,7 @@ def require_core_workflow(authorization: str | None = Header(default=None)) -> d
 def require_core_workflow_v2(authorization: str | None = Header(default=None)) -> dict:
     return _core_workflow_claims(
         authorization, workflow="publish-gateway-policy-v2.yml",
-        events={"workflow_dispatch"},
+        events={"push", "workflow_dispatch"},
     )
 
 
