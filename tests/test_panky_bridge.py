@@ -266,6 +266,48 @@ def test_workspace_authorization_preview_is_hidden_from_legacy_principals():
     from app.mcp_server import _tool_authorization_error
 
     assert _tool_authorization_error(Principal.management(), "check_workspace_authorization") == "tool_denied"
+def test_panky_catalog_previews_full_policy_batches_concurrently(monkeypatch):
+    registry = SimpleNamespace(sources=[])
+    monkeypatch.setattr("app.mcp_server.get_runtime_gateway",
+                        lambda: SimpleNamespace(registry=registry))
+    monkeypatch.setattr("app.mcp_server.N8NInstanceRegistry.from_environment",
+                        lambda: SimpleNamespace(ids=lambda: ()))
+    batches = []
+
+    def preview(requests):
+        batches.append(requests)
+        return [{"allowed": True, "reason": "super_admin", "grant_tool": "*"}
+                for _ in requests]
+
+    monkeypatch.setattr("app.mcp_server.preview_policy_decisions", preview)
+    tools = [MCPTool(name=f"acquisition_test_{index}", description="Read",
+                     input_schema={"type": "object"}) for index in range(205)]
+    visible = asyncio.run(mcp_server._panky_catalog(
+        tools, Principal.panky(subject="fixture-sub", email="dev@example.com")))
+    assert len(visible) == 205
+    assert sorted(len(batch) for batch in batches) == [5, 100, 100]
+
+
+def test_slow_optional_downstream_cannot_hide_gateway_tools(monkeypatch):
+    class SlowCatalog:
+        async def list_tools(self):
+            await asyncio.sleep(10)
+            return []
+
+    class FastCatalog:
+        async def list_tools(self):
+            return []
+
+    monkeypatch.setattr("app.mcp_server.get_n8n_client", lambda: SlowCatalog())
+    monkeypatch.setattr("app.mcp_server.get_openwa_client", lambda: FastCatalog())
+    binding = bind_principal(Principal.management())
+    started = time.monotonic()
+    try:
+        tools = asyncio.run(mcp_server.list_tools())
+    finally:
+        reset_principal(binding)
+    assert time.monotonic() - started < 4.5
+    assert "acquisition_get_exploration_map" in {tool.name for tool in tools}
 
 
 def test_policy_allowed_panky_can_read_acquisition_without_widening_developer(monkeypatch):

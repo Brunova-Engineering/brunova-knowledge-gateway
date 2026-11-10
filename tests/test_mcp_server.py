@@ -688,9 +688,9 @@ def test_acquisition_exploration_tool_schemas_are_bounded(monkeypatch):
     tools = run(scenario()).tools
     by_name = {tool.name: tool for tool in tools}
     map_schema = by_name["acquisition_get_exploration_map"].input_schema
-    assert set(map_schema["required"]) >= {"cycle_id"}
+    assert set(map_schema["required"]) >= {"cycle_id", "market"}
     assert set(map_schema["properties"]) == {"cycle_id", "market"}
-    assert map_schema["properties"]["market"]["anyOf"][0]["enum"] == ["MX", "US"]
+    assert map_schema["properties"]["market"]["enum"] == ["MX", "US"]
 
     command_schema = by_name["acquisition_direct_exploration"].input_schema
     assert set(command_schema["required"]) >= {
