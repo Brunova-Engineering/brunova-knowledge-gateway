@@ -487,3 +487,13 @@ def test_gateway_context_decision_rejects_legacy_and_uses_verified_actor(
     assert allowed.status_code == 200 and allowed.json()["allowed"] is False
     assert seen[0][0].subject == "google-subject"
     assert seen[0][1] == body
+
+
+def test_n8n_execution_is_distinct_from_introspection_in_policy():
+    from app.mcp_server import _panky_operation
+
+    assert _panky_operation("n8n_instance_call_tool", "n8n", None) == "execute"
+    assert _panky_operation("n8n_custom_downstream_tool", "n8n", None) == "execute"
+    assert _panky_operation("n8n_instance_status", "n8n", None) == "call"
+    assert _panky_operation("n8n_instance_list_tools", "n8n", None) == "call"
+    assert _panky_operation("workspace_create", "workspace", "create") == "create"

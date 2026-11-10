@@ -101,28 +101,39 @@ def _grant_matches(grant: dict, request: Request, seat: dict, *,
     return False
 
 
-def _base_external(request: Request, seat: dict, data: dict, departments: dict) -> bool:
+def _role_allows_external(request: Request, seat: dict, data: dict) -> bool:
     resource = _lookup(data["resources"], "resource_id").get(request.target_id)
     if not resource or resource["status"] != "active":
         return False
     tool = _lookup(data["tools"], "tool_id").get(str(resource["tool_id"]))
     if not tool or tool["status"] != "active":
         return False
-    has_operation = any(
+    return any(
         str(row["role_id"]) == str(seat["role_id"])
         and str(row["tool_id"]) == str(resource["tool_id"])
         and row["operation"] == request.operation
         for row in data["role_operations"]
     )
-    if not has_operation:
+
+
+def _base_external(request: Request, seat: dict, data: dict, departments: dict) -> bool:
+    resource = _lookup(data["resources"], "resource_id").get(request.target_id)
+    if not resource:
         return False
     seat_dept = str(seat["department_id"])
-    return any(
-        str(row["resource_id"]) == request.target_id and
-        _descendant_of(str(row["department_id"]), seat_dept,
-                       departments, "parent_department_id")
-        for row in data["department_resources"]
-    )
+    bindings = [row for row in data["department_resources"]
+                if str(row["resource_id"]) == request.target_id]
+    # Transitional v2 rows have no Seat owner. The v3 publisher must populate
+    # it; until then retain the old decision so deployment can be staged.
+    if resource.get("owner_seat_id") is None:
+        return any(_descendant_of(str(row["department_id"]), seat_dept,
+                                  departments, "parent_department_id") for row in bindings)
+    if str(resource["owner_seat_id"]) == str(seat["seat_id"]):
+        return True
+    if seat.get("seat_type") != "admin":
+        return False
+    return any(_descendant_of(str(row["department_id"]), seat_dept,
+                              departments, "parent_department_id") for row in bindings)
 
 
 def _base_context(request: Request, seat: dict, data: dict,
@@ -213,6 +224,11 @@ def decide(data: dict[str, list[dict]], request: Request, now: datetime | None =
                for g in grants):
             return Decision(False, "actor_deny")
     for seat in active:
+        if request.target_kind == "external_resource":
+            if target.get("owner_seat_id") is not None and seat.get("seat_type") not in {"basic", "admin"}:
+                continue
+            if not _role_allows_external(request, seat, data):
+                continue
         applicable = [g for g in grants if _grant_matches(
             g, request, seat, departments=departments, nodes=nodes, now=now)]
         if any(g["effect"] == "deny" for g in applicable):

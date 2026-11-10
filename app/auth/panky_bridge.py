@@ -234,6 +234,72 @@ def context_decision(identity: PankyIdentity, *, node_id: str, surface: str,
         raise PankyBridgeError("Panky 2.0 context decision is unavailable") from None
 
 
+_GOVERNANCE_ACTIONS = {
+    "share_request": "/v2/governance/shares",
+    "share_decide": "/v2/governance/shares/decide",
+    "founder_transfer_request": "/v2/governance/founder-transfers",
+    "founder_transfer_decide": "/v2/governance/founder-transfers/decide",
+    "super_admin_change": "/v2/governance/super-admin-changes",
+    "resource_grant_request": "/v2/governance/resource-grants",
+    "resource_grant_revoke": "/v2/governance/resource-grants/revoke",
+    "resource_sharing": "/v2/governance/resource-sharing",
+}
+
+
+def governance_action(identity: PankyIdentity, action: str, body: dict) -> dict:
+    """Relay a narrow governance action with the verified Panky identity."""
+    base = os.getenv("PANKY_POLICY_BACKEND_URL", "")
+    if not base.startswith("https://") or policy_v2_mode() != "enforce":
+        raise PankyBridgeError("Panky governance is unavailable")
+    if action not in _GOVERNANCE_ACTIONS:
+        raise PankyBridgeError("Unknown governance action")
+    payload = dict(body)
+    payload["actor"] = {"issuer": identity.issuer, "subject": identity.subject,
+                        "email": identity.email}
+    try:
+        workload_token = id_token.fetch_id_token(GoogleRequest(), base)
+        response = httpx.post(
+            f"{base.rstrip('/')}{_GOVERNANCE_ACTIONS[action]}",
+            headers={"Authorization": f"Bearer {workload_token}"},
+            json=payload, timeout=5,
+        )
+        if response.status_code in {403, 409, 422}:
+            return {"status": "denied", "reason": response.json().get("detail", "invalid_request")}
+        response.raise_for_status()
+        result = response.json()
+        if (not isinstance(result, dict) or
+                result.get("status") not in {"pending", "approved", "rejected", "accepted",
+                                             "expired"} or
+                result.get("effective") is not False):
+            raise ValueError("invalid governance response")
+        return result
+    except (httpx.HTTPError, ValueError, TypeError, KeyError):
+        raise PankyBridgeError("Panky governance is unavailable") from None
+
+
+def governance_inbox(identity: PankyIdentity) -> dict:
+    base = os.getenv("PANKY_POLICY_BACKEND_URL", "")
+    if not base.startswith("https://") or policy_v2_mode() != "enforce":
+        raise PankyBridgeError("Panky governance is unavailable")
+    try:
+        workload_token = id_token.fetch_id_token(GoogleRequest(), base)
+        response = httpx.post(
+            f"{base.rstrip('/')}/v2/governance/inbox",
+            headers={"Authorization": f"Bearer {workload_token}"},
+            json={"issuer": identity.issuer, "subject": identity.subject,
+                  "email": identity.email}, timeout=5,
+        )
+        response.raise_for_status()
+        result = response.json()
+        if (not isinstance(result, dict)
+                or not isinstance(result.get("share_requests"), list)
+                or not isinstance(result.get("founder_transfers"), list)):
+            raise ValueError("invalid governance inbox")
+        return result
+    except (httpx.HTTPError, ValueError, TypeError, KeyError):
+        raise PankyBridgeError("Panky governance inbox is unavailable") from None
+
+
 def complete_policy_use(reservation_id: str, request_id: str, status: str) -> None:
     base = os.getenv("PANKY_POLICY_BACKEND_URL", "")
     if not base.startswith("https://"):

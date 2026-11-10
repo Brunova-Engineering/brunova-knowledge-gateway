@@ -49,7 +49,7 @@ from app.source_registry import SourceRegistry, SourceRegistryMetadata
 from app.auth.pubsub_push import parse_pubsub_signal, verify_pubsub_oidc
 from app.agent_signals import AgentSignalInbox
 from app.runtime import get_runtime_gateway
-from app.auth.panky_bridge import PankyBridgeError, PankyIdentity, context_catalog, context_decision, issue_access_token
+from app.auth.panky_bridge import PankyBridgeError, PankyIdentity, context_catalog, context_decision, governance_action, governance_inbox, issue_access_token
 from pydantic import BaseModel
 
 
@@ -69,6 +69,11 @@ class PankyContextCompletion(BaseModel):
     reservation_id: str
     request_id: str
     status: str
+
+
+class PankyGovernanceAction(BaseModel):
+    action: str
+    data: dict
 
 
 @asynccontextmanager
@@ -106,6 +111,40 @@ def panky_context_catalog(request: Request):
                                              principal.oidc_email))
     except PankyBridgeError:
         raise HTTPException(503, "Context catalog is unavailable") from None
+
+
+@app.post("/panky/governance/action")
+def panky_governance_action(item: PankyGovernanceAction, request: Request):
+    principal = getattr(request.state, "principal", None)
+    if (principal is None or principal.type != "panky"
+            or not principal.oidc_subject or not principal.oidc_email):
+        raise HTTPException(403, "Panky OIDC identity is required")
+    if item.action not in {"share_request", "share_decide",
+                           "founder_transfer_request", "founder_transfer_decide",
+                           "super_admin_change", "resource_grant_request",
+                           "resource_grant_revoke", "resource_sharing"}:
+        raise HTTPException(422, "Unsupported governance action")
+    try:
+        return governance_action(
+            PankyIdentity("https://accounts.google.com",
+                          principal.oidc_subject, principal.oidc_email),
+            item.action, item.data)
+    except PankyBridgeError:
+        raise HTTPException(503, "Governance is unavailable") from None
+
+
+@app.get("/panky/governance/inbox")
+def panky_governance_inbox(request: Request):
+    principal = getattr(request.state, "principal", None)
+    if (principal is None or principal.type != "panky"
+            or not principal.oidc_subject or not principal.oidc_email):
+        raise HTTPException(403, "Panky OIDC identity is required")
+    try:
+        return governance_inbox(
+            PankyIdentity("https://accounts.google.com",
+                          principal.oidc_subject, principal.oidc_email))
+    except PankyBridgeError:
+        raise HTTPException(503, "Governance inbox is unavailable") from None
 
 
 @app.post("/panky/context/decide")

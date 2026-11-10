@@ -56,6 +56,7 @@ class Seat(Strict):
     reports_to: str | None = None
     occupancy: Literal["single", "multiple"] = "single"
     occupants: list[str] = Field(default_factory=list)
+    seat_type: Literal["basic", "admin"] | None = None
 
 
 class Resource(Strict):
@@ -64,6 +65,7 @@ class Resource(Strict):
     resource_kind: str
     external_ref: str
     owner_department: str
+    owner_seat: str | None = None
     shared_departments: list[str] = Field(default_factory=list)
 
 
@@ -105,8 +107,9 @@ class Grant(Strict):
 
 
 class Policy(Strict):
-    schema_version: Literal[2]
+    schema_version: Literal[2, 3]
     tenant: str
+    founder_actor_id: str | None = None
     actors: list[Actor]
     context_nodes: list[ContextNode]
     departments: list[Department]
@@ -188,6 +191,14 @@ class Policy(Strict):
                 raise ValueError("Resource shares with an unknown department")
             if r.owner_department in r.shared_departments:
                 raise ValueError("Resource owner cannot also be shared")
+            if self.schema_version == 3:
+                if r.owner_seat not in seat_map:
+                    raise ValueError("Resource owner Seat is unknown")
+                if seat_map[r.owner_seat].department != r.owner_department:
+                    raise ValueError("Resource owner Seat must belong to owner department")
+        if self.schema_version == 3:
+            if self.founder_actor_id not in actors:
+                raise ValueError("Founder Actor is unknown")
         for rule in self.context_rules:
             if (rule.subject_kind == "role_in_seat") != (rule.role is not None):
                 raise ValueError("Context rule role mismatch")

@@ -1,6 +1,6 @@
 # Panky 2.0 policy projection
 
-This package adds the approved 15-table model to the existing policy service.
+This package projects the approved 19-table model to the existing policy service.
 The live `/v1` routes and their database remain available during the bridge.
 The `/v2` routes use a **separate PostgreSQL database** selected only by
 `PANKY_POLICY_V2_DSN`. Never run `schema.sql` against the v1 database.
@@ -28,8 +28,10 @@ The `/v2` routes use a **separate PostgreSQL database** selected only by
    and v2 grant completion. Existing manual Gateway tokens keep their current
    route throughout the bridge. An unavailable v2 decision fails closed.
 
-The bridge is not removed by this deployment. Removing it requires the
-separate approval requested by the Actor after live validation.
+Panky 2.2 uses Google OIDC only. The old static Management token remains
+available to unrelated Gateway clients, but cannot authenticate to the
+Panky context and governance routes. Earlier Panky installations keep their
+governed recovery path until they reach READY on 2.2.
 
 ## Security boundaries
 
