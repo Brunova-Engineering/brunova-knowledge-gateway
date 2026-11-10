@@ -409,17 +409,20 @@ class BrunovaMCPServer(MCPServer):
             provider = _tool_provider(name)
             capability = TOOL_CAPABILITIES.get(name)
             if provider == "workspace" and capability:
-                targets = [("source", source) for source in sources]
+                targets = [(*_workspace_policy_resource(source), source) for source in sources]
             elif provider == "n8n":
                 instance_ids = (n8n_instances if name in N8N_ROUTED_TOOLS
                                 else ["brunova"])
-                targets = [("instance", instance) for instance in instance_ids]
+                targets = [("instance", instance, None) for instance in instance_ids]
             else:
-                targets = [("tool", name)]
-            for kind, reference in targets:
+                targets = [("tool", name, None)]
+            for kind, reference, source_alias in targets:
                 entries.append((name, {
                     "actor": actor, "provider": provider, "tool": name,
                     "resource_kind": kind, "resource_ref": reference,
+                    "parent_source": reference if provider == "workspace" else None,
+                    "parent_resource_kind": kind if provider == "workspace" else "source",
+                    "source_alias": source_alias,
                     "operation": _panky_operation(name, provider, capability),
                     "request_id": f"catalog:{uuid4()}", "preview": True,
                 }))
@@ -473,7 +476,7 @@ class BrunovaMCPServer(MCPServer):
                 and artifact_ref and isinstance(source_id, str) and source_id):
             resource_kind, resource_ref = "document", artifact_ref
         elif provider == "workspace" and isinstance(source_id, str) and source_id:
-            resource_kind, resource_ref = "source", source_id
+            resource_kind, resource_ref = _workspace_policy_resource(source_id)
         elif provider == "n8n":
             resource_kind = "instance"
             resource_ref = str(arguments.get("instance_id") or "brunova")
@@ -502,7 +505,11 @@ class BrunovaMCPServer(MCPServer):
                 policy_decision, identity, provider=provider, tool=policy_tool,
                 resource_kind=resource_kind, resource_ref=resource_ref,
                 operation=operation, request_id=request_id,
-                parent_source=source_id if resource_kind == "document" else None,
+                parent_source=(_workspace_policy_resource(source_id)[1]
+                               if provider == "workspace" and source_id else None),
+                parent_resource_kind=(_workspace_policy_kind(source_id)
+                                      if resource_kind == "document" else "source"),
+                source_alias=source_id if provider == "workspace" else None,
             )
             if (not decision["allowed"] or
                     (name in MANAGEMENT_ONLY_TOOLS
@@ -519,8 +526,12 @@ class BrunovaMCPServer(MCPServer):
             if provider == "workspace" and isinstance(destination, str) and destination:
                 destination_decision = await asyncio.to_thread(
                     policy_decision, identity, provider=provider, tool=policy_tool,
-                    resource_kind="source", resource_ref=destination,
+                    resource_kind=_workspace_policy_resource(destination)[0],
+                    resource_ref=_workspace_policy_resource(destination)[1],
                     operation=operation, request_id=f"{request_id}:destination",
+                    parent_source=_workspace_policy_resource(destination)[1],
+                    parent_resource_kind=_workspace_policy_resource(destination)[0],
+                    source_alias=destination,
                 )
                 if not destination_decision["allowed"]:
                     for reservation, use_request in reservations:
@@ -578,7 +589,11 @@ class BrunovaMCPServer(MCPServer):
                 "actor": {"issuer": identity.issuer, "subject": identity.subject,
                           "email": identity.email},
                 "provider": "workspace", "tool": "list_sources",
-                "resource_kind": "source", "resource_ref": source.id,
+                "resource_kind": _workspace_policy_resource(source.id)[0],
+                "resource_ref": _workspace_policy_resource(source.id)[1],
+                "parent_source": _workspace_policy_resource(source.id)[1],
+                "parent_resource_kind": _workspace_policy_resource(source.id)[0],
+                "source_alias": source.id,
                 "operation": "read", "request_id": f"list_sources:{uuid4()}",
                 "preview": True,
             } for source in candidates]
@@ -876,6 +891,19 @@ N8N_ROUTED_TOOLS = frozenset({
     "n8n_instance_call_tool",
 })
 N8N_STATIC_TOOLS = N8N_ROUTED_TOOLS | {"n8n_status", "n8n_list_tools"}
+
+
+def _workspace_policy_resource(source_id: str) -> tuple[str, str]:
+    """Resolve a source alias to its actual Drive resource identity."""
+    try:
+        source = get_runtime_gateway().registry.get(source_id)
+    except (KeyError, ValueError, AttributeError, WorkspaceAdapterError):
+        return "source", source_id  # Legacy projection until enrollment.
+    return source.location_type, source.location_id
+
+
+def _workspace_policy_kind(source_id: str) -> str:
+    return _workspace_policy_resource(source_id)[0]
 
 
 def _panky_operation(name: str, provider: str, capability: str | None) -> str:
@@ -1181,8 +1209,13 @@ def check_workspace_authorization(
             request = {
                 "actor": {"issuer": "https://accounts.google.com",
                           "subject": principal.oidc_subject, "email": principal.oidc_email},
-                "provider": "workspace", "tool": tool_name, "resource_kind": "source",
-                "resource_ref": source_id, "operation": operation,
+                "provider": "workspace", "tool": tool_name,
+                "resource_kind": _workspace_policy_resource(source_id)[0],
+                "resource_ref": _workspace_policy_resource(source_id)[1],
+                "operation": operation,
+                "parent_source": _workspace_policy_resource(source_id)[1],
+                "parent_resource_kind": _workspace_policy_resource(source_id)[0],
+                "source_alias": source_id,
                 "request_id": f"authorization_preview:{request_id}", "preview": True,
             }
             try:
