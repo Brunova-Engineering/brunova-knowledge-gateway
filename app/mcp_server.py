@@ -415,6 +415,15 @@ class BrunovaMCPServer(MCPServer):
                 }))
         allowed: set[str] = introspection_tools & {tool.name for tool in tools}
         try:
+            if not entries:
+                return [tool for tool in tools if tool.name in allowed]
+            # The policy service grants super_admin globally. Verify that
+            # status once for this actor and release; actual calls still pass
+            # through their individual policy decision.
+            probe = await asyncio.wait_for(asyncio.to_thread(
+                preview_policy_decisions, [entries[0][1]]), timeout=10)
+            if probe[0]["allowed"] and probe[0].get("reason") == "super_admin":
+                return tools
             # The policy API accepts up to 100 decisions per request. Preview
             # independent batches together so tools/list cannot time out while
             # waiting for one network round trip per small batch.
@@ -424,7 +433,7 @@ class BrunovaMCPServer(MCPServer):
                 asyncio.to_thread(preview_policy_decisions,
                                   [request for _, request in chunk])
                 for chunk in chunks
-            )), timeout=21)
+            )), timeout=12)
             for chunk, decisions in zip(chunks, previews):
                 for (name, _), decision in zip(chunk, decisions):
                     if (decision["allowed"] and
