@@ -25,9 +25,10 @@ def _current_request_route(conn, actor_id: str, seat_id: UUID,
         "SELECT status,super_admin FROM panky_actors WHERE actor_id=%s",
         (actor_id,),
     ).fetchone()
-    if actor is None or actor[0] != "active":
+    if actor is None or (actor["status"] if isinstance(actor, dict) else actor[0]) != "active":
         return False
-    if actor[1]:
+    is_super_admin = actor["super_admin"] if isinstance(actor, dict) else actor[1]
+    if is_super_admin:
         return True
     seat = conn.execute(
         "SELECT s.department_id,s.seat_type FROM panky_seats s "
@@ -38,7 +39,9 @@ def _current_request_route(conn, actor_id: str, seat_id: UUID,
     ).fetchone()
     if seat is None:
         return False
-    if admin and seat[1] != "admin":
+    seat_type = seat["seat_type"] if isinstance(seat, dict) else seat[1]
+    seat_department = seat["department_id"] if isinstance(seat, dict) else seat[0]
+    if admin and seat_type != "admin":
         return False
     return bool(conn.execute(
         "WITH RECURSIVE lineage AS ("
@@ -46,7 +49,7 @@ def _current_request_route(conn, actor_id: str, seat_id: UUID,
         "UNION ALL SELECT d.department_id,d.parent_department_id FROM panky_departments d "
         "JOIN lineage l ON d.department_id=l.parent_department_id) "
         "SELECT 1 FROM lineage WHERE department_id=%s",
-        (department_id, seat[0]),
+        (department_id, seat_department),
     ).fetchone())
 
 

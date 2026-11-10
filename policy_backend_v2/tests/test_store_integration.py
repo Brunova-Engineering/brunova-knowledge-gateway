@@ -594,6 +594,8 @@ def test_approved_department_share_fails_if_requester_loses_admin_seat(db):
         conn.execute("DELETE FROM panky_actor_seats WHERE actor_id='act_dev_001' "
                      "AND seat_id=%s", (stable("seat", "finance_contributor"),))
     with pytest.raises(ValueError, match="approval is stale"):
+        governance.approved_for_core()
+    with pytest.raises(ValueError, match="approval is stale"):
         activate(db, changed, registry, topology, "e" * 40)
     with psycopg.connect(db) as conn:
         assert conn.execute("SELECT 1 FROM panky_department_resources WHERE resource_id=%s "

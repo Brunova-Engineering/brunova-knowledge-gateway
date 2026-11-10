@@ -12,6 +12,8 @@ from uuid import UUID, uuid4
 import psycopg
 from psycopg.rows import dict_row
 
+from .publication import _current_request_route
+
 
 def _actor(conn, issuer: str, subject: str, email: str):
     if issuer != "https://accounts.google.com" or not subject or not email:
@@ -181,6 +183,44 @@ class GovernanceStore:
     def approved_for_core(self) -> dict:
         """Return only approved, unused changes to the verified Core workflow."""
         with psycopg.connect(self.dsn, row_factory=dict_row) as conn:
+            # A request can lose its authority after approval. Reject the batch
+            # before Core changes its head, rather than waiting for publication
+            # to discover a stale approval after the commit has been pushed.
+            for row in conn.execute(
+                "SELECT q.requested_by_actor_id,q.requested_via_seat_id,"
+                "q.decided_by_actor_id,q.decided_via_seat_id,"
+                "q.source_department_id,q.target_department_id "
+                "FROM panky_resource_share_requests q WHERE q.status='approved' "
+                "AND q.activated_release_id IS NULL"
+            ):
+                if (not _current_request_route(
+                        conn, row["requested_by_actor_id"], row["requested_via_seat_id"],
+                        row["source_department_id"], admin=True)
+                        or not _current_request_route(
+                            conn, row["decided_by_actor_id"], row["decided_via_seat_id"],
+                            row["target_department_id"], admin=True)):
+                    raise ValueError("Department share approval is stale")
+            for row in conn.execute(
+                "SELECT q.requested_by_actor_id,q.requested_via_seat_id,q.action,"
+                "r.owner_seat_id,d.department_id AS owner_department_id,"
+                "s.department_id AS recipient_department_id "
+                "FROM panky_resource_grant_requests q "
+                "JOIN panky_resources r ON r.resource_id=q.resource_id "
+                "JOIN panky_department_resources d ON d.resource_id=r.resource_id "
+                "AND d.relation='owned' "
+                "JOIN panky_seats s ON s.seat_id=q.recipient_seat_id "
+                "WHERE q.activated_release_id IS NULL"
+            ):
+                target_department = (row["recipient_department_id"]
+                                     if row["action"] == "allow" and
+                                     row["recipient_department_id"] != row["owner_department_id"]
+                                     else row["owner_department_id"])
+                owner_route = (row["requested_via_seat_id"] == row["owner_seat_id"]
+                               and target_department == row["owner_department_id"])
+                if not _current_request_route(
+                        conn, row["requested_by_actor_id"], row["requested_via_seat_id"],
+                        target_department, admin=not owner_route):
+                    raise ValueError("Resource grant approval is stale")
             shares = [
                 {"request_id": str(row["request_id"]), "resource": row["resource_code"],
                  "target_department": row["target_code"]}
