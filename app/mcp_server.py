@@ -212,6 +212,16 @@ class ArtifactReferenceToolResult(ArtifactReference):
     request_id: str
 
 
+class PolicyResourceResolutionToolResult(BaseModel):
+    """Verified source-scoped identity for Core resource enrollment."""
+
+    external_ref: str
+    name: str
+    type: str
+    source_id: str
+    request_id: str
+
+
 class ArtifactReferenceMutationToolResult(ArtifactReferenceMutationResult):
     request_id: str
 
@@ -830,6 +840,7 @@ TOOL_CAPABILITIES: dict[str, str] = {
     "check_workspace_authorization": "read",
     "list_sources": "read",
     "resolve_source_artifact": "read",
+    "resolve_policy_resource": "read",
     "inspect_document_structure": "read",
     "inspect_document_tab": "read",
     "validate_document_structure": "read",
@@ -1431,6 +1442,46 @@ def resolve_source_artifact(
         source_id=source_id,
         resource_type="source_artifact_reference",
         result_resource_id=lambda result: result.artifact_ref,
+    )
+
+
+@mcp_server.tool()
+def resolve_policy_resource(
+    source_id: str,
+    ctx: Context,
+    name: str | None = None,
+    logical_path: str | None = None,
+    artifact_type: str | None = None,
+) -> PolicyResourceResolutionToolResult:
+    """Resolve a named, authorized Drive resource for governed Core enrollment."""
+
+    def operation(runtime: KnowledgeRuntime, request_id: str) -> PolicyResourceResolutionToolResult:
+        codec = _reference_codec(runtime)
+        reference = resolve_authorized_source_artifact(
+            registry=runtime.registry,
+            source_policy=runtime.source_policy,
+            workspace_adapter=runtime.workspace_adapter,
+            reference_codec=codec,
+            source_id=source_id,
+            name=name,
+            logical_path=logical_path,
+            artifact_type=artifact_type,
+        )
+        return PolicyResourceResolutionToolResult(
+            external_ref=codec.decode(reference.artifact_ref, source_id=source_id),
+            name=reference.name,
+            type=reference.type,
+            source_id=source_id,
+            request_id=request_id,
+        )
+
+    return _execute_tool(
+        ctx=ctx,
+        action="resolve_policy_resource",
+        operation=operation,
+        source_id=source_id,
+        resource_type="source_artifact_reference",
+        result_resource_id=lambda result: result.external_ref,
     )
 
 

@@ -598,6 +598,7 @@ def test_mcp_exposes_only_governed_tools(monkeypatch):
         "inspect_source_artifacts",
         "convert_source_artifact",
         "resolve_source_artifact",
+        "resolve_policy_resource",
         "copy_source_artifact",
         "rename_source_artifact",
         "inspect_document_structure",
@@ -1119,6 +1120,37 @@ def test_artifact_resolution_rejects_missing_ambiguous_and_out_of_scope(monkeypa
     ambiguous = run(call_with([in_scope, replace(in_scope, id="document_67890")]))
     out_of_scope = run(call_with([outside]))
 
+    assert "artifact_not_found" in missing.content[0].text
+    assert "artifact_selector_ambiguous" in ambiguous.content[0].text
+    assert "artifact_not_found" in out_of_scope.content[0].text
+
+
+def test_policy_resource_resolution_returns_verified_id_only_in_source(monkeypatch):
+    gateway_runtime = runtime()
+    in_scope = replace(
+        gateway_runtime.workspace_adapter.get_resource("document_12345"),
+        name="Budget Plan",
+    )
+    outside = replace(in_scope, id="outside_document_123", ancestor_ids=("other_folder_123",))
+    monkeypatch.setattr(mcp_module, "get_runtime_gateway", lambda: gateway_runtime)
+
+    async def call_with(matches):
+        gateway_runtime.workspace_adapter.find_resources = Mock(return_value=matches)
+        async with Client(mcp_module.mcp_server) as client:
+            return await client.call_tool(
+                "resolve_policy_resource",
+                {"source_id": "career_ops", "name": "Budget Plan"},
+            )
+
+    found = run(call_with([in_scope]))
+    assert found.is_error is False
+    assert found.structured_content["external_ref"] == in_scope.id
+    assert found.structured_content["source_id"] == "career_ops"
+    assert "artifact_ref" not in found.structured_content
+
+    missing = run(call_with([]))
+    ambiguous = run(call_with([in_scope, replace(in_scope, id="document_67890")]))
+    out_of_scope = run(call_with([outside]))
     assert "artifact_not_found" in missing.content[0].text
     assert "artifact_selector_ambiguous" in ambiguous.content[0].text
     assert "artifact_not_found" in out_of_scope.content[0].text
