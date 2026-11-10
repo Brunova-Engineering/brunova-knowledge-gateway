@@ -170,7 +170,7 @@ def test_list_sources_uses_source_read_policy_and_filters_result(monkeypatch):
 
     def preview(requests):
         seen.extend(requests)
-        return [{"allowed": request["resource_ref"] == "allowed"} for request in requests]
+        return [{"allowed": request["resource_ref"] == "folder_allowed"} for request in requests]
 
     monkeypatch.setattr("app.mcp_server.preview_policy_decisions", preview)
     monkeypatch.setattr("app.mcp_server.policy_decision",
@@ -183,9 +183,36 @@ def test_list_sources_uses_source_read_policy_and_filters_result(monkeypatch):
 
     assert not result.is_error
     assert [source["id"] for source in result.structured_content["sources"]] == ["allowed"]
-    assert {request["resource_ref"] for request in seen} == {"allowed", "denied"}
-    assert all(request["resource_kind"] == "source" and request["operation"] == "read"
+    assert {request["resource_ref"] for request in seen} == {"folder_allowed", "folder_denied"}
+    assert all(request["resource_kind"] == "folder" and request["operation"] == "read"
                for request in seen)
+
+
+def test_workspace_shared_drive_uses_drive_id_and_legacy_alias(monkeypatch):
+    source = SourceDefinition.model_validate({
+        "id": "hq_client", "name": "Headquarters", "system": "google_workspace",
+        "location_type": "shared_drive", "location_id": "drive_hq_12345",
+        "classification": "management_only", "owner": ["Management"],
+        "status": "active", "capabilities": {"read": True},
+    })
+    registry = SourceRegistry(SourceRegistryDocument(version=1, sources=(source,)))
+    monkeypatch.setattr("app.mcp_server.get_runtime_gateway",
+                        lambda: SimpleNamespace(registry=registry))
+    monkeypatch.setattr("app.mcp_server.emit_audit_record", lambda **kwargs: None)
+    monkeypatch.setattr("app.mcp_server._mcp_request_id", lambda context: "drive-test")
+    seen = []
+    monkeypatch.setattr("app.mcp_server.preview_policy_decisions",
+                        lambda requests: (seen.extend(requests) or
+                                          [{"allowed": True} for _ in requests]))
+    binding = bind_principal(Principal.panky(subject="fixture-sub", email="dev@example.com"))
+    try:
+        result = asyncio.run(mcp_server.call_tool("list_sources", {}))
+    finally:
+        reset_principal(binding)
+    assert not result.is_error
+    assert seen[0]["resource_kind"] == "shared_drive"
+    assert seen[0]["resource_ref"] == "drive_hq_12345"
+    assert seen[0]["source_alias"] == "hq_client"
 
 
 def test_list_sources_denies_when_no_source_is_readable(monkeypatch):
@@ -257,7 +284,7 @@ def test_workspace_authorization_preview_is_read_only_and_checks_effective_acces
     assert outside.structured_content["reason"] == "source_unavailable"
     assert [item["operation"] for item in seen] == ["read", "delete"]
     assert [item["tool"] for item in seen] == ["list_source_documents", "delete_source_artifact"]
-    assert all(item["preview"] is True and item["resource_kind"] == "source"
+    assert all(item["preview"] is True and item["resource_kind"] == "folder"
                for item in seen)
     assert [tool.name for tool in catalog] == ["check_workspace_authorization"]
 

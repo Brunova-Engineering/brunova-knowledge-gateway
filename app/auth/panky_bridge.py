@@ -132,7 +132,8 @@ def verify_access_token(token: str) -> PankyIdentity:
 def policy_decision(
     identity: PankyIdentity, *, provider: str, tool: str,
     resource_kind: str, resource_ref: str, operation: str, request_id: str,
-    parent_source: str | None = None,
+    parent_source: str | None = None, parent_resource_kind: str = "source",
+    source_alias: str | None = None,
 ) -> dict:
     base = os.getenv("PANKY_POLICY_BACKEND_URL", "")
     if not base.startswith("https://"):
@@ -146,6 +147,8 @@ def policy_decision(
             "provider": provider, "tool": tool,
             "resource_kind": resource_kind, "resource_ref": resource_ref,
             "parent_source": parent_source,
+            "parent_resource_kind": parent_resource_kind,
+            "source_alias": source_alias,
             "operation": operation, "request_id": request_id,
         }
         response = httpx.post(
