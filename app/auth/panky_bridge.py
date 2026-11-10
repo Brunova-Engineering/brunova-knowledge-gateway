@@ -267,6 +267,13 @@ def governance_action(identity: PankyIdentity, action: str, body: dict) -> dict:
             return {"status": "denied", "reason": response.json().get("detail", "invalid_request")}
         response.raise_for_status()
         result = response.json()
+        if action == "resource_sharing":
+            if (not isinstance(result, dict)
+                    or result.get("resource_id") != body.get("resource_id")
+                    or not isinstance(result.get("active_grants"), list)
+                    or not isinstance(result.get("shared_departments"), list)):
+                raise ValueError("invalid resource sharing response")
+            return result
         if (not isinstance(result, dict) or
                 result.get("status") not in {"pending", "approved", "rejected", "accepted",
                                              "expired"} or

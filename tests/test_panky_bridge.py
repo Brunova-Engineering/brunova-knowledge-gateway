@@ -497,3 +497,22 @@ def test_n8n_execution_is_distinct_from_introspection_in_policy():
     assert _panky_operation("n8n_instance_status", "n8n", None) == "call"
     assert _panky_operation("n8n_instance_list_tools", "n8n", None) == "call"
     assert _panky_operation("workspace_create", "workspace", "create") == "create"
+
+
+def test_governance_resource_sharing_accepts_read_inventory(monkeypatch):
+    from app.auth import panky_bridge
+
+    identity = PankyIdentity("https://accounts.google.com", "synthetic-sub",
+                             "dev@example.invalid")
+    monkeypatch.setenv("PANKY_POLICY_BACKEND_URL", "https://policy.example.invalid")
+    monkeypatch.setenv("PANKY_POLICY_V2_MODE", "enforce")
+    monkeypatch.setattr(panky_bridge.id_token, "fetch_id_token",
+                        lambda request, audience: "synthetic-service-proof")
+    inventory = {"resource_id": "resource-1", "active_grants": [],
+                 "shared_departments": []}
+    monkeypatch.setattr(panky_bridge.httpx, "post", lambda *_args, **_kwargs:
+                        SimpleNamespace(status_code=200, raise_for_status=lambda: None,
+                                        json=lambda: inventory))
+    assert panky_bridge.governance_action(
+        identity, "resource_sharing",
+        {"resource_id": "resource-1", "via_seat_id": "seat-1"}) == inventory
