@@ -13,6 +13,11 @@ The `/v2` routes use a **separate PostgreSQL database** selected only by
    the root-owned service environment and deploy the code with the existing
    `/v1` routes unchanged. `/v2/health` is expected to return 503 until a
    reviewed Core release is active.
+   When applying `migrations/0005_seat_authority_resource_owner.sql` to an
+   existing v2 database, grant the runtime database role `SELECT, INSERT,
+   UPDATE, DELETE` on its four new request tables before restarting the
+   service. Verify the role can read `panky_resource_share_requests`; a
+   successful migration as database owner does not grant that access.
 3. Publish `policy/brunova-gateway-policy-v2.json` from the exact protected
    Core `main` commit, with its actor, Seat and topology registries. The
    backend rejects mismatched actors, parents, Seat bindings and occupants.
