@@ -444,6 +444,10 @@ Tools disponibles:
 - `resolve_source_artifact`: consulta el estado actual del corpus Drive de la
   fuente, resuelve recursivamente nombre exacto o logical path y devuelve un
   handle cifrado, autenticado y ligado a esa fuente; no usa índice de artefactos;
+- `resolve_policy_resource`: usa la misma búsqueda y validación de alcance
+  para entregar al agente el identificador estable que necesita el alta en
+  Core. No amplía acceso ni publica el recurso; una coincidencia ambigua o
+  fuera de la fuente autorizada se rechaza;
 - `copy_source_artifact`: copia un Google Doc o Google Sheet nativo sin modificar
   el original, preservando estructura y formato mediante Drive copy;
 - `rename_source_artifact`: renombra un artefacto source-scoped;
