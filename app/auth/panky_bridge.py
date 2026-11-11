@@ -237,6 +237,37 @@ def context_decision(identity: PankyIdentity, *, node_id: str, surface: str,
         raise PankyBridgeError("Panky 2.0 context decision is unavailable") from None
 
 
+def visible_policy_resources(identity: PankyIdentity) -> list[dict]:
+    """Fetch only registered resource references readable by this Actor."""
+    base = os.getenv("PANKY_POLICY_BACKEND_URL", "")
+    if not base.startswith("https://") or policy_v2_mode() != "enforce":
+        raise PankyBridgeError("Panky resource policy is unavailable")
+    try:
+        workload_token = id_token.fetch_id_token(GoogleRequest(), base)
+        response = httpx.post(
+            f"{base.rstrip('/')}/v2/resources/visible",
+            headers={"Authorization": f"Bearer {workload_token}"},
+            json={"issuer": identity.issuer, "subject": identity.subject,
+                  "email": identity.email}, timeout=5,
+        )
+        response.raise_for_status()
+        result = response.json()
+        if (result.get("status") != "ready"
+                or not isinstance(result.get("resources"), list)
+                or not isinstance(result.get("release"), str)):
+            raise ValueError("invalid resource inventory")
+        resources = result["resources"]
+        if any(not isinstance(item, dict)
+               or not isinstance(item.get("tool"), str)
+               or not isinstance(item.get("resource_kind"), str)
+               or not isinstance(item.get("external_ref"), str)
+               for item in resources):
+            raise ValueError("invalid resource inventory")
+        return resources
+    except (httpx.HTTPError, ValueError, TypeError, KeyError):
+        raise PankyBridgeError("Panky resource inventory is unavailable") from None
+
+
 _GOVERNANCE_ACTIONS = {
     "share_request": "/v2/governance/shares",
     "share_decide": "/v2/governance/shares/decide",

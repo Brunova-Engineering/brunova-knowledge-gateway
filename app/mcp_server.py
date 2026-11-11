@@ -59,6 +59,7 @@ from app.auth.principals import (
 from app.auth.panky_bridge import (
     PankyBridgeError, PankyIdentity,
     complete_policy_use, policy_decision, preview_policy_decisions,
+    visible_policy_resources,
 )
 from app.document_production import (
     ArtifactReference,
@@ -400,6 +401,17 @@ class BrunovaMCPServer(MCPServer):
             n8n_instances = list(N8NInstanceRegistry.from_environment().ids())
         except Exception:
             return []
+        try:
+            visible_resources = await asyncio.to_thread(
+                visible_policy_resources,
+                PankyIdentity(issuer="https://accounts.google.com",
+                              subject=principal.oidc_subject,
+                              email=principal.oidc_email),
+            )
+        except PankyBridgeError:
+            # The new inventory endpoint may roll out after this Gateway.
+            # Existing source-scoped capabilities remain policy gated.
+            visible_resources = []
         entries: list[tuple[str, dict]] = []
         introspection_tools = {"check_workspace_authorization"}
         for tool in tools:
@@ -410,6 +422,12 @@ class BrunovaMCPServer(MCPServer):
             capability = TOOL_CAPABILITIES.get(name)
             if provider == "workspace" and capability:
                 targets = [(*_workspace_policy_resource(source), source) for source in sources]
+                if name != "list_sources":
+                    targets.extend(
+                        (resource["resource_kind"], resource["external_ref"], None)
+                        for resource in visible_resources
+                        if resource["tool"] == "workspace"
+                    )
             elif provider == "n8n":
                 instance_ids = (n8n_instances if name in N8N_ROUTED_TOOLS
                                 else ["brunova"])
@@ -420,7 +438,8 @@ class BrunovaMCPServer(MCPServer):
                 entries.append((name, {
                     "actor": actor, "provider": provider, "tool": name,
                     "resource_kind": kind, "resource_ref": reference,
-                    "parent_source": reference if provider == "workspace" else None,
+                    "parent_source": (reference if provider == "workspace" and source_alias
+                                      else None),
                     "parent_resource_kind": kind if provider == "workspace" else "source",
                     "source_alias": source_alias,
                     "operation": _panky_operation(name, provider, capability),
@@ -474,7 +493,15 @@ class BrunovaMCPServer(MCPServer):
         artifact_ref = arguments.get("artifact_ref")
         if (provider == "workspace" and isinstance(artifact_ref, str)
                 and artifact_ref and isinstance(source_id, str) and source_id):
-            resource_kind, resource_ref = "document", artifact_ref
+            try:
+                resource_ref = _reference_codec(get_runtime_gateway()).decode(
+                    artifact_ref, source_id=source_id)
+            except Exception:
+                return CallToolResult(
+                    content=[TextContent(type="text", text="artifact_not_found")],
+                    is_error=True,
+                )
+            resource_kind = "document"
         elif provider == "workspace" and isinstance(source_id, str) and source_id:
             resource_kind, resource_ref = _workspace_policy_resource(source_id)
         elif provider == "n8n":
@@ -499,6 +526,50 @@ class BrunovaMCPServer(MCPServer):
             return await self._panky_list_sources(arguments, context, identity)
         if name == "check_workspace_authorization":
             return await self._call_tool_impl(name, arguments, context)
+        if name in {"resolve_source_artifact", "resolve_policy_resource"}:
+            # A named object can be readable even when its containing Drive is
+            # not. Resolve the exact candidate, then authorize that registered
+            # resource before returning any identifying result to the Actor.
+            if not isinstance(source_id, str) or not source_id:
+                return CallToolResult(
+                    content=[TextContent(type="text", text="artifact_not_found")],
+                    is_error=True,
+                )
+            found = await self._call_tool_impl(name, arguments, context)
+            if found.is_error or not isinstance(found.structured_content, dict):
+                return CallToolResult(
+                    content=[TextContent(type="text", text="artifact_not_found")],
+                    is_error=True,
+                )
+            details = found.structured_content
+            try:
+                external_ref = (details["external_ref"] if name == "resolve_policy_resource"
+                                else _reference_codec(get_runtime_gateway()).decode(
+                                    details["artifact_ref"], source_id=source_id))
+                kind = str(details["type"])
+                decision = await asyncio.to_thread(
+                    policy_decision, identity, provider="workspace", tool=name,
+                    resource_kind=kind, resource_ref=external_ref,
+                    operation="read", request_id=request_id,
+                    parent_source=_workspace_policy_resource(source_id)[1],
+                    parent_resource_kind=_workspace_policy_kind(source_id),
+                    source_alias=source_id,
+                )
+            except (KeyError, ValueError, PankyBridgeError):
+                return CallToolResult(
+                    content=[TextContent(type="text", text="policy_unavailable")],
+                    is_error=True,
+                )
+            if not decision["allowed"]:
+                return CallToolResult(
+                    content=[TextContent(type="text", text="artifact_not_found")],
+                    is_error=True,
+                )
+            if decision.get("reservation_id"):
+                await asyncio.to_thread(
+                    complete_policy_use, decision["reservation_id"], request_id, "committed"
+                )
+            return found
         reservations: list[tuple[str, str]] = []
         try:
             decision = await asyncio.to_thread(
