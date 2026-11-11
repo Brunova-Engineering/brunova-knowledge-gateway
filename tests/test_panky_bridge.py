@@ -633,6 +633,26 @@ def test_document_owner_sees_read_tools_without_parent_drive_access(monkeypatch)
     assert [tool.name for tool in visible] == ["resolve_source_artifact", "retrieve_document"]
 
 
+def test_document_owner_keeps_bounded_read_tools_when_wide_preview_fails(monkeypatch):
+    registry = SimpleNamespace(sources=[
+        SimpleNamespace(id="hq_client", status=SimpleNamespace(value="active")),
+    ])
+    monkeypatch.setattr("app.mcp_server.get_runtime_gateway",
+                        lambda: SimpleNamespace(registry=registry))
+    monkeypatch.setattr("app.mcp_server.visible_policy_resources",
+                        lambda identity: [{"tool": "workspace", "resource_kind": "document",
+                                           "external_ref": "owned_document"}])
+    monkeypatch.setattr("app.mcp_server.preview_policy_decisions",
+                        lambda requests: (_ for _ in ()).throw(PankyBridgeError("timeout")))
+    tools = [MCPTool(name=name, description=name, input_schema={"type": "object"})
+             for name in ("resolve_source_artifact", "resolve_policy_resource",
+                          "retrieve_document", "edit_source_document", "list_sources")]
+    visible = asyncio.run(mcp_server._panky_catalog(
+        tools, Principal.panky(subject="fixture-sub", email="dev@example.com")))
+    assert [tool.name for tool in visible] == [
+        "resolve_source_artifact", "resolve_policy_resource", "retrieve_document"]
+
+
 def test_named_document_resolution_checks_exact_resource_not_parent(monkeypatch):
     async def resolve(*args):
         return CallToolResult(content=[TextContent(type="text", text="found")],

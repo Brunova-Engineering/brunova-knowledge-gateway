@@ -446,6 +446,17 @@ class BrunovaMCPServer(MCPServer):
                     "request_id": f"catalog:{uuid4()}", "preview": True,
                 }))
         allowed: set[str] = introspection_tools & {tool.name for tool in tools}
+        # The resource inventory has already checked the active policy for
+        # read access. Keep the bounded document entry points available even
+        # if the wider tool-preview batch times out; every call checks the
+        # exact resource again before returning any content.
+        if any(resource["tool"] == "workspace"
+               and resource["resource_kind"] == "document"
+               for resource in visible_resources):
+            allowed.update({
+                "resolve_source_artifact", "resolve_policy_resource",
+                "retrieve_document",
+            } & {tool.name for tool in tools})
         try:
             if not entries:
                 return [tool for tool in tools if tool.name in allowed]
@@ -474,7 +485,7 @@ class BrunovaMCPServer(MCPServer):
                              or decision.get("grant_tool") == name)):
                         allowed.add(name)
         except (PankyBridgeError, TimeoutError):
-            return []
+            return [tool for tool in tools if tool.name in allowed]
         return [tool for tool in tools if tool.name in allowed]
 
     async def call_tool(
