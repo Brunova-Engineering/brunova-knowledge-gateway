@@ -608,3 +608,56 @@ def test_governance_resource_sharing_accepts_read_inventory(monkeypatch):
     assert panky_bridge.governance_action(
         identity, "resource_sharing",
         {"resource_id": "resource-1", "via_seat_id": "seat-1"}) == inventory
+
+
+def test_document_owner_sees_read_tools_without_parent_drive_access(monkeypatch):
+    registry = SimpleNamespace(sources=[
+        SimpleNamespace(id="hq_client", status=SimpleNamespace(value="active")),
+    ])
+    monkeypatch.setattr("app.mcp_server.get_runtime_gateway",
+                        lambda: SimpleNamespace(registry=registry))
+    monkeypatch.setattr("app.mcp_server.visible_policy_resources",
+                        lambda identity: [{"tool": "workspace", "resource_kind": "document",
+                                           "external_ref": "owned_document"}])
+    monkeypatch.setattr("app.mcp_server.preview_policy_decisions",
+                        lambda requests: [{"allowed": request["resource_kind"] == "document"
+                                           and request["resource_ref"] == "owned_document"
+                                           and request["operation"] == "read",
+                                           "reason": "owner", "grant_tool": "*"}
+                                          for request in requests])
+    tools = [MCPTool(name=name, description=name, input_schema={"type": "object"})
+             for name in ("resolve_source_artifact", "retrieve_document",
+                          "delete_source_artifact", "list_sources")]
+    visible = asyncio.run(mcp_server._panky_catalog(
+        tools, Principal.panky(subject="fixture-sub", email="dev@example.com")))
+    assert [tool.name for tool in visible] == ["resolve_source_artifact", "retrieve_document"]
+
+
+def test_named_document_resolution_checks_exact_resource_not_parent(monkeypatch):
+    async def resolve(*args):
+        return CallToolResult(content=[TextContent(type="text", text="found")],
+                              structuredContent={"artifact_ref": "opaque", "type": "document"})
+
+    monkeypatch.setattr(mcp_server, "_call_tool_impl", resolve)
+    monkeypatch.setattr("app.mcp_server._reference_codec",
+                        lambda runtime: SimpleNamespace(decode=lambda ref, source_id: "owned_document"))
+    monkeypatch.setattr("app.mcp_server.get_runtime_gateway", lambda: SimpleNamespace())
+    monkeypatch.setattr("app.mcp_server._workspace_policy_resource",
+                        lambda source: ("shared_drive", "drive_hq"))
+    seen = []
+
+    def decision(*args, **kwargs):
+        seen.append(kwargs)
+        return {"allowed": kwargs["resource_ref"] == "owned_document"}
+
+    monkeypatch.setattr("app.mcp_server.policy_decision", decision)
+    binding = bind_principal(Principal.panky(subject="fixture-sub", email="dev@example.com"))
+    try:
+        result = asyncio.run(mcp_server.call_tool(
+            "resolve_source_artifact", {"source_id": "hq_client", "name": "My document"}))
+    finally:
+        reset_principal(binding)
+    assert result.is_error is False
+    assert seen[0]["resource_kind"] == "document"
+    assert seen[0]["resource_ref"] == "owned_document"
+    assert seen[0]["parent_source"] == "drive_hq"
