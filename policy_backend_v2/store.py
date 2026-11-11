@@ -110,6 +110,44 @@ class PolicyStoreV2:
         data["active_release_id"] = release_id
         return data
 
+    def visible_resources(self, *, issuer: str, subject: str, email: str) -> dict:
+        """Return only registered resources readable by this verified Actor."""
+        if issuer != "https://accounts.google.com" or not subject or not email:
+            return {"status": "denied", "reason": "invalid_identity"}
+        with psycopg.connect(self.dsn, row_factory=dict_row, connect_timeout=3) as conn:
+            with conn.transaction():
+                conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                release = conn.execute(
+                    "SELECT release_id,core_commit FROM panky_policy_releases WHERE status='active'"
+                ).fetchone()
+                if release is None:
+                    return {"status": "denied", "reason": "policy_unavailable"}
+                actor = conn.execute(
+                    "SELECT actor_id,oidc_subject,status FROM panky_actors "
+                    "WHERE oidc_issuer=%s AND email=%s",
+                    (issuer, email.casefold()),
+                ).fetchone()
+                if actor is None or actor["status"] != "active":
+                    return {"status": "denied", "reason": "actor_unknown"}
+                if actor["oidc_subject"] is not None and actor["oidc_subject"] != subject:
+                    return {"status": "denied", "reason": "subject_mismatch"}
+                data = self._snapshot(conn, str(release["release_id"]))
+                tools = {str(row["tool_id"]): row["code"] for row in data["tools"]}
+                resources = []
+                for row in data["resources"]:
+                    if row["status"] != "active":
+                        continue
+                    result = decide(data, Request(actor["actor_id"], "external_resource",
+                                                  str(row["resource_id"]), "read"))
+                    if result.allowed:
+                        resources.append({
+                            "tool": tools[str(row["tool_id"])],
+                            "resource_kind": row["resource_kind"],
+                            "external_ref": row["external_ref"],
+                        })
+                return {"status": "ready", "release": release["core_commit"],
+                        "resources": resources}
+
     def decide(self, *, issuer: str, subject: str, email: str,
                request: Request, request_id: str, preview: bool = False) -> dict:
         if issuer != "https://accounts.google.com" or not subject or not email or not request_id:

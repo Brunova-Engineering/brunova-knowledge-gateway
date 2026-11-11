@@ -36,6 +36,8 @@ class ExternalRequest(BaseModel):
     resource_kind: str
     resource_ref: str
     parent_source: str | None = None
+    parent_resource_kind: str = "source"
+    source_alias: str | None = None
     operation: str
     request_id: str = Field(min_length=1)
     preview: bool = False
@@ -142,6 +144,17 @@ def health(database: PolicyStoreV2 = Depends(store)) -> dict:
         raise HTTPException(503, "Policy database is unavailable") from None
 
 
+@app.post("/v2/resources/visible")
+def visible_resources(item: ActorProof, _: None = Depends(require_gateway),
+                      database: PolicyStoreV2 = Depends(store)) -> dict:
+    """Registered resource references scoped by the active policy decision."""
+    try:
+        return database.visible_resources(issuer=item.issuer, subject=item.subject,
+                                          email=item.email)
+    except Exception:
+        raise HTTPException(503, "Resource inventory is unavailable") from None
+
+
 def _decide_external(item: ExternalRequest, database: PolicyStoreV2) -> dict:
     with psycopg.connect(database.dsn, connect_timeout=3) as conn:
         tool = conn.execute(
@@ -153,22 +166,30 @@ def _decide_external(item: ExternalRequest, database: PolicyStoreV2) -> dict:
         row = conn.execute(
             "SELECT r.resource_id FROM panky_resources r "
             "WHERE r.tool_id=%s AND r.status='active' AND ((r.resource_kind=%s AND r.external_ref=%s) "
+            "OR (r.resource_kind=%s AND r.external_ref=%s) "
+            "OR (r.resource_kind='source' AND r.external_ref=%s) "
             "OR (r.resource_kind='source' AND r.external_ref=%s)) "
-            "ORDER BY CASE WHEN r.resource_kind=%s AND r.external_ref=%s THEN 0 ELSE 1 END "
+            "ORDER BY CASE WHEN r.resource_kind=%s AND r.external_ref=%s THEN 0 "
+            "WHEN r.resource_kind=%s AND r.external_ref=%s THEN 1 ELSE 2 END "
             "LIMIT 1",
             # Tool rows model connected systems; item.tool is a concrete
             # Gateway command already checked by the Gateway catalog.
-            (tool[0], item.resource_kind, item.resource_ref, item.parent_source,
-             item.resource_kind, item.resource_ref),
+            (tool[0], item.resource_kind, item.resource_ref,
+             item.parent_resource_kind, item.parent_source,
+             item.parent_source, item.source_alias,
+             item.resource_kind, item.resource_ref,
+             item.parent_resource_kind, item.parent_source),
         ).fetchone()
         if conn.execute(
             "SELECT 1 FROM panky_resources d WHERE d.tool_id=%s AND d.status='disabled' "
             "AND ((d.resource_kind=%s AND d.external_ref=%s) "
+            "OR (d.resource_kind='source' AND d.external_ref=%s) "
             "OR (d.resource_kind='source' AND d.external_ref=%s)) "
             "AND NOT EXISTS (SELECT 1 FROM panky_resources a WHERE a.tool_id=d.tool_id "
             "AND a.resource_kind=d.resource_kind AND a.external_ref=d.external_ref "
             "AND a.status='active')",
-            (tool[0], item.resource_kind, item.resource_ref, item.parent_source),
+            (tool[0], item.resource_kind, item.resource_ref,
+             item.parent_source, item.source_alias),
         ).fetchone():
             return {"allowed": False, "reason": "resource_disabled"}
     actor_id = database.actor_for_oidc(item.actor.issuer, item.actor.email)
