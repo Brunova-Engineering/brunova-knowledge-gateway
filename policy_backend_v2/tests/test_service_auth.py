@@ -6,7 +6,7 @@ from fastapi import HTTPException
 from policy_backend import service_auth
 
 
-def test_v2_core_publisher_is_separate_and_dispatch_only(monkeypatch):
+def test_v2_core_publisher_accepts_protected_main_push_or_dispatch(monkeypatch):
     claims = {
         "repository_id": "1391259854", "repository": "Pancracio-s/pancracio-core",
         "ref": "refs/heads/main", "event_name": "workflow_dispatch",
@@ -18,10 +18,7 @@ def test_v2_core_publisher_is_separate_and_dispatch_only(monkeypatch):
         "Keys", (), {"get_signing_key_from_jwt": lambda self, token: type(
             "Key", (), {"key": "synthetic-key"})()})())
     monkeypatch.setattr(service_auth.jwt, "decode", lambda *args, **kwargs: claims)
-    assert service_auth._core_workflow_claims(
-        "Bearer synthetic-proof", workflow="publish-gateway-policy-v2.yml",
-        events={"workflow_dispatch"},
-    )["sha"] == "a" * 40
+    assert service_auth.require_core_workflow_v2("Bearer synthetic-proof")["sha"] == "a" * 40
     with pytest.raises(HTTPException) as denied_v1:
         service_auth._core_workflow_claims(
             "Bearer synthetic-proof", workflow="publish-gateway-policy.yml",
@@ -29,12 +26,11 @@ def test_v2_core_publisher_is_separate_and_dispatch_only(monkeypatch):
         )
     assert denied_v1.value.status_code == 403
     claims["event_name"] = "push"
-    with pytest.raises(HTTPException) as denied_push:
-        service_auth._core_workflow_claims(
-            "Bearer synthetic-proof", workflow="publish-gateway-policy-v2.yml",
-            events={"workflow_dispatch"},
-        )
-    assert denied_push.value.status_code == 403
+    assert service_auth.require_core_workflow_v2("Bearer synthetic-proof")["sha"] == "a" * 40
+    claims["ref"] = "refs/heads/dev"
+    with pytest.raises(HTTPException) as denied_dev:
+        service_auth.require_core_workflow_v2("Bearer synthetic-proof")
+    assert denied_dev.value.status_code == 403
 
 
 def test_core_governance_workflow_identity_is_separate(monkeypatch):

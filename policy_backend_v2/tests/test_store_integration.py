@@ -727,3 +727,29 @@ def test_existing_policy_database_migration_adds_governance_projection(db):
             "SELECT column_name FROM information_schema.columns "
             "WHERE table_name='panky_resources' AND column_name='owner_seat_id'"
         ).fetchone()[0] == "owner_seat_id"
+
+
+def test_visible_resource_inventory_keeps_document_scope_private(db):
+    old, registry, topology = example()
+    payload = old.model_dump(mode="python")
+    payload["schema_version"] = 3
+    payload["founder_actor_id"] = "act_jorge"
+    for seat in payload["seats"]:
+        seat["seat_type"] = "admin" if seat["code"] == "management_01" else "basic"
+    for resource in payload["resources"]:
+        resource["owner_seat"] = ("dev_01" if resource["code"] == "hq_drive"
+                                  else "finance_contributor")
+    activate(db, Policy.model_validate(payload), registry, topology, "a" * 40)
+    from policy_backend_v2.publication import stable
+    with psycopg.connect(db) as conn:
+        conn.execute("DELETE FROM panky_actor_seats WHERE actor_id='act_dev_001' AND seat_id=%s",
+                     (stable("seat", "dev_01"),))
+    result = PolicyStoreV2(db).visible_resources(
+        issuer="https://accounts.google.com", subject="oidc-dev",
+        email="dev@example.invalid")
+    assert result["status"] == "ready"
+    assert result["resources"] == [{"tool": "workspace", "resource_kind": "source",
+                                    "external_ref": "finance_drive"}]
+    assert PolicyStoreV2(db).visible_resources(
+        issuer="https://accounts.google.com", subject="oidc-dev",
+        email="unknown@example.invalid")["status"] == "denied"

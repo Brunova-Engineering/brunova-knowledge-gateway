@@ -144,6 +144,17 @@ def health(database: PolicyStoreV2 = Depends(store)) -> dict:
         raise HTTPException(503, "Policy database is unavailable") from None
 
 
+@app.post("/v2/resources/visible")
+def visible_resources(item: ActorProof, _: None = Depends(require_gateway),
+                      database: PolicyStoreV2 = Depends(store)) -> dict:
+    """Registered resource references scoped by the active policy decision."""
+    try:
+        return database.visible_resources(issuer=item.issuer, subject=item.subject,
+                                          email=item.email)
+    except Exception:
+        raise HTTPException(503, "Resource inventory is unavailable") from None
+
+
 def _decide_external(item: ExternalRequest, database: PolicyStoreV2) -> dict:
     with psycopg.connect(database.dsn, connect_timeout=3) as conn:
         tool = conn.execute(
