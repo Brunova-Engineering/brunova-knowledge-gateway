@@ -11,6 +11,7 @@ import os
 import time
 from dataclasses import dataclass
 from secrets import token_urlsafe
+from uuid import UUID, uuid5
 
 import httpx
 from google.auth.transport.requests import Request as GoogleRequest
@@ -22,6 +23,15 @@ class PankyBridgeError(ValueError):
 
 
 _LOG = logging.getLogger(__name__)
+_POLICY_ID_NAMESPACE = UUID("8de4d0f8-35db-4ae0-bff9-b311e941b5ae")
+
+
+def _resource_reference(value: str) -> str:
+    """Match the policy backend's stable resource reference for a Core code."""
+    try:
+        return str(UUID(value))
+    except ValueError:
+        return str(uuid5(_POLICY_ID_NAMESPACE, f"v2:resource:{value}"))
 
 
 def bridge_mode() -> str:
@@ -302,12 +312,14 @@ def governance_action(identity: PankyIdentity, action: str, body: dict) -> dict:
         response.raise_for_status()
         result = response.json()
         if action == "resource_sharing":
-            if (not isinstance(result, dict)
-                    or result.get("resource_id") != body.get("resource_id")
+            requested = body.get("resource_id")
+            if (not isinstance(requested, str) or not requested or len(requested) > 128
+                    or not isinstance(result, dict)
+                    or result.get("resource_id") not in {requested, _resource_reference(requested)}
                     or not isinstance(result.get("active_grants"), list)
                     or not isinstance(result.get("shared_departments"), list)):
                 raise ValueError("invalid resource sharing response")
-            return result
+            return {**result, "resource_id": requested}
         if (not isinstance(result, dict) or
                 result.get("status") not in {"pending", "approved", "rejected", "accepted",
                                              "expired"} or
