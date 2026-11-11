@@ -591,7 +591,9 @@ def test_n8n_execution_is_distinct_from_introspection_in_policy():
     assert _panky_operation("workspace_create", "workspace", "create") == "create"
 
 
-def test_governance_resource_sharing_accepts_read_inventory(monkeypatch):
+@pytest.mark.parametrize("returns_internal_uuid", [False, True])
+def test_governance_resource_sharing_accepts_read_inventory(monkeypatch,
+                                                           returns_internal_uuid):
     from app.auth import panky_bridge
 
     identity = PankyIdentity("https://accounts.google.com", "synthetic-sub",
@@ -600,14 +602,17 @@ def test_governance_resource_sharing_accepts_read_inventory(monkeypatch):
     monkeypatch.setenv("PANKY_POLICY_V2_MODE", "enforce")
     monkeypatch.setattr(panky_bridge.id_token, "fetch_id_token",
                         lambda request, audience: "synthetic-service-proof")
-    inventory = {"resource_id": "resource-1", "active_grants": [],
+    inventory = {"resource_id": (panky_bridge._resource_reference("resource-1")
+                                  if returns_internal_uuid else "resource-1"),
+                 "active_grants": [],
                  "shared_departments": []}
     monkeypatch.setattr(panky_bridge.httpx, "post", lambda *_args, **_kwargs:
                         SimpleNamespace(status_code=200, raise_for_status=lambda: None,
                                         json=lambda: inventory))
     assert panky_bridge.governance_action(
         identity, "resource_sharing",
-        {"resource_id": "resource-1", "via_seat_id": "seat-1"}) == inventory
+        {"resource_id": "resource-1", "via_seat_id": "seat-1"}) == {
+            **inventory, "resource_id": "resource-1"}
 
 
 def test_document_owner_sees_read_tools_without_parent_drive_access(monkeypatch):
