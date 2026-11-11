@@ -379,10 +379,13 @@ def revoke_resource_grant(item: ResourceGrantRequest, _: None = Depends(require_
 def resource_sharing(item: ResourceSharingQuery, _: None = Depends(require_gateway),
                      database: PolicyStoreV2 = Depends(store)) -> dict:
     try:
-        return GovernanceStore(database.dsn).resource_sharing(
+        inventory = GovernanceStore(database.dsn).resource_sharing(
             issuer=item.actor.issuer, subject=item.actor.subject, email=item.actor.email,
             resource_id=_reference("resource", item.resource_id),
             via_seat_id=_reference("seat", item.via_seat_id))
+        # The governed client addresses a resource by its Core code. Keep that
+        # code in the response; the store uses a stable UUID only internally.
+        return {**inventory, "resource_id": item.resource_id}
     except ValueError as exc:
         raise HTTPException(403, str(exc)) from None
     except Exception:
