@@ -630,7 +630,8 @@ def test_document_owner_sees_read_tools_without_parent_drive_access(monkeypatch)
                           "delete_source_artifact", "list_sources")]
     visible = asyncio.run(mcp_server._panky_catalog(
         tools, Principal.panky(subject="fixture-sub", email="dev@example.com")))
-    assert [tool.name for tool in visible] == ["resolve_source_artifact", "retrieve_document"]
+    assert [tool.name for tool in visible] == [
+        "resolve_source_artifact", "retrieve_document", "list_sources"]
 
 
 def test_document_owner_keeps_bounded_read_tools_when_wide_preview_fails(monkeypatch):
@@ -650,7 +651,72 @@ def test_document_owner_keeps_bounded_read_tools_when_wide_preview_fails(monkeyp
     visible = asyncio.run(mcp_server._panky_catalog(
         tools, Principal.panky(subject="fixture-sub", email="dev@example.com")))
     assert [tool.name for tool in visible] == [
-        "resolve_source_artifact", "resolve_policy_resource", "retrieve_document"]
+        "resolve_source_artifact", "resolve_policy_resource", "retrieve_document",
+        "list_sources"]
+
+
+def test_source_label_is_discoverable_from_one_visible_document():
+    from app.adapters.google_workspace.errors import WorkspaceAdapterError
+    from app.mcp_server import _sources_containing_visible_resources
+
+    sources = [
+        SimpleNamespace(id="hq_client", status=SimpleNamespace(value="active"),
+                        capabilities=SimpleNamespace(read=True)),
+        SimpleNamespace(id="other", status=SimpleNamespace(value="active"),
+                        capabilities=SimpleNamespace(read=True)),
+    ]
+
+    def authorize_resource(resource, source):
+        if source.id != "hq_client":
+            raise WorkspaceAdapterError("resource_not_in_source", "Not in source", 403)
+
+    runtime = SimpleNamespace(
+        registry=SimpleNamespace(sources=sources),
+        workspace_adapter=SimpleNamespace(get_resource=lambda ref: SimpleNamespace(id=ref)),
+        source_policy=SimpleNamespace(authorize_source=lambda source: source,
+                                      authorize_resource_for_source=authorize_resource),
+    )
+    assert _sources_containing_visible_resources(runtime, [
+        {"tool": "workspace", "resource_kind": "document", "external_ref": "doc-1"}
+    ]) == {"hq_client"}
+
+
+def test_list_sources_includes_only_source_containing_owned_document(monkeypatch):
+    from app.adapters.google_workspace.errors import WorkspaceAdapterError
+    from app.mcp_server import _panky_list_sources_scope
+
+    sources = [
+        SimpleNamespace(id="hq_client", status=SimpleNamespace(value="active"),
+                        capabilities=SimpleNamespace(read=True)),
+        SimpleNamespace(id="other", status=SimpleNamespace(value="active"),
+                        capabilities=SimpleNamespace(read=True)),
+    ]
+
+    def authorize_resource(resource, source):
+        if source.id != "hq_client":
+            raise WorkspaceAdapterError("resource_not_in_source", "Not in source", 403)
+
+    runtime = SimpleNamespace(
+        registry=SimpleNamespace(sources=sources),
+        workspace_adapter=SimpleNamespace(get_resource=lambda ref: SimpleNamespace(id=ref)),
+        source_policy=SimpleNamespace(authorize_source=lambda source: source,
+                                      authorize_resource_for_source=authorize_resource),
+    )
+    monkeypatch.setattr("app.mcp_server.get_runtime_gateway", lambda: runtime)
+    monkeypatch.setattr("app.mcp_server.preview_policy_decisions",
+                        lambda requests: [{"allowed": False} for _ in requests])
+    monkeypatch.setattr("app.mcp_server.visible_policy_resources",
+                        lambda identity: [{"tool": "workspace", "resource_kind": "document",
+                                           "external_ref": "doc-1"}])
+
+    async def fake_impl(*args):
+        return CallToolResult(content=[TextContent(type="text", text="scoped")],
+                              structuredContent={"sources": sorted(_panky_list_sources_scope.get())})
+
+    monkeypatch.setattr(mcp_server, "_call_tool_impl", fake_impl)
+    result = asyncio.run(mcp_server._panky_list_sources(
+        {}, None, PankyIdentity("https://accounts.google.com", "sub", "dev@example.com")))
+    assert result.structured_content == {"sources": ["hq_client"]}
 
 
 def test_named_document_resolution_checks_exact_resource_not_parent(monkeypatch):

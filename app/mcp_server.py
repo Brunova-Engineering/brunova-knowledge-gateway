@@ -455,7 +455,7 @@ class BrunovaMCPServer(MCPServer):
                for resource in visible_resources):
             allowed.update({
                 "resolve_source_artifact", "resolve_policy_resource",
-                "retrieve_document",
+                "retrieve_document", "list_sources",
             } & {tool.name for tool in tools})
         try:
             if not entries:
@@ -680,19 +680,27 @@ class BrunovaMCPServer(MCPServer):
                 "preview": True,
             } for source in candidates]
             decisions = await asyncio.to_thread(preview_policy_decisions, requests) if requests else []
+            allowed = {source.id for source, decision in zip(candidates, decisions)
+                       if decision["allowed"]}
         except PankyBridgeError:
             return CallToolResult(
                 content=[TextContent(type="text", text="policy_unavailable: Authorization could not be verified.")],
                 is_error=True,
             )
-        allowed = frozenset(source.id for source, decision in zip(candidates, decisions)
-                            if decision["allowed"])
+        try:
+            visible = await asyncio.to_thread(visible_policy_resources, identity)
+            allowed.update(await asyncio.to_thread(
+                _sources_containing_visible_resources, get_runtime_gateway(), visible))
+        except PankyBridgeError:
+            # Keep existing source-level discovery while the resource
+            # inventory endpoint is unavailable during rollout.
+            pass
         if not allowed:
             return CallToolResult(
                 content=[TextContent(type="text", text="policy_denied: The requested operation is not authorized.")],
                 is_error=True,
             )
-        scope = _panky_list_sources_scope.set(allowed)
+        scope = _panky_list_sources_scope.set(frozenset(allowed))
         try:
             return await self._call_tool_impl("list_sources", arguments, context)
         finally:
@@ -986,6 +994,31 @@ def _workspace_policy_resource(source_id: str) -> tuple[str, str]:
 
 def _workspace_policy_kind(source_id: str) -> str:
     return _workspace_policy_resource(source_id)[0]
+
+
+def _sources_containing_visible_resources(runtime: KnowledgeRuntime,
+                                          resources: list[dict]) -> set[str]:
+    """Reveal a source label only when it contains an individually readable item."""
+    sources = [source for source in runtime.registry.sources
+               if source.status.value == "active" and source.capabilities.read]
+    matched: set[str] = set()
+    for item in resources:
+        if item["tool"] != "workspace" or item["resource_kind"] not in {"document", "sheet"}:
+            continue
+        try:
+            actual = runtime.workspace_adapter.get_resource(item["external_ref"])
+        except WorkspaceAdapterError:
+            continue
+        for source in sources:
+            if source.id in matched:
+                continue
+            try:
+                allowed_source = runtime.source_policy.authorize_source(source)
+                runtime.source_policy.authorize_resource_for_source(actual, allowed_source)
+            except WorkspaceAdapterError:
+                continue
+            matched.add(source.id)
+    return matched
 
 
 def _panky_operation(name: str, provider: str, capability: str | None) -> str:
