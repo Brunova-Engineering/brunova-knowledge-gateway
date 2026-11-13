@@ -7,6 +7,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .org_actions import CATALOG
+
 
 class Strict(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -81,7 +83,7 @@ class ContextRule(Strict):
 class Grant(Strict):
     subject_kind: Literal["actor", "seat", "role", "department"]
     subject: str
-    target_kind: Literal["external_resource", "context_node"]
+    target_kind: Literal["external_resource", "context_node", "org_action"]
     target: str
     surface: Literal["shared", "knowledge", "state", "work", "contributions"] | None = None
     operation: str
@@ -96,7 +98,14 @@ class Grant(Strict):
     @model_validator(mode="after")
     def check_grant(self):
         if (self.target_kind == "context_node") != (self.surface is not None):
-            raise ValueError("Context grants need a surface; resource grants cannot have one")
+            raise ValueError("Context grants need a surface; other grants cannot have one")
+        if self.target_kind == "org_action":
+            action = CATALOG.get(self.target)
+            if action is None or not action.delegable or action.governed_only:
+                raise ValueError("Organizational action is unknown or cannot be delegated")
+            if (self.operation != "invoke" or self.subject_kind != "seat"
+                    or self.effect != "allow" or self.include_descendants):
+                raise ValueError("Action delegation requires an allow grant to one Seat for invoke")
         if self.expires_at is not None and self.expires_at <= self.valid_from:
             raise ValueError("Grant expiry must be after its start")
         if self.valid_from.tzinfo is None or (self.expires_at and self.expires_at.tzinfo is None):
@@ -208,7 +217,8 @@ class Policy(Strict):
                     rule.subject_kind != "role_in_seat" or rule.target_class != "seat_context"
                     or rule.operation != "read"):
                 raise ValueError("Reporting subtree only grants role-scoped Seat reads")
-        targets = {"external_resource": resources, "context_node": nodes}
+        targets = {"external_resource": resources, "context_node": nodes,
+                   "org_action": set(CATALOG)}
         subjects = {"actor": actors, "seat": seats, "role": roles, "department": departments}
         for grant in self.grants:
             if grant.subject not in subjects[grant.subject_kind]:

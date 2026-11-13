@@ -18,6 +18,7 @@ TABLES = {
     "context_rules": "panky_context_rules", "tools": "panky_tools",
     "resources": "panky_resources", "department_resources": "panky_department_resources",
     "role_operations": "panky_role_operations", "grants": "panky_grants",
+    "org_actions": "panky_org_actions",
 }
 
 
@@ -109,6 +110,62 @@ class PolicyStoreV2:
                 for name, table in TABLES.items()}
         data["active_release_id"] = release_id
         return data
+
+    def available_org_actions(self, *, issuer: str, subject: str, email: str) -> dict:
+        """Expose only the authenticated Actor's effective action names."""
+        if issuer != "https://accounts.google.com" or not subject or not email:
+            return {"status": "denied", "reason": "invalid_identity"}
+        now = datetime.now(timezone.utc)
+        with psycopg.connect(self.dsn, row_factory=dict_row, connect_timeout=3) as conn:
+            with conn.transaction():
+                conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                release = conn.execute(
+                    "SELECT release_id,core_commit FROM panky_policy_releases WHERE status='active'"
+                ).fetchone()
+                if release is None:
+                    return {"status": "denied", "reason": "policy_unavailable"}
+                actor = conn.execute(
+                    "SELECT actor_id,oidc_subject,status,super_admin,founder FROM panky_actors "
+                    "WHERE oidc_issuer=%s AND email=%s",
+                    (issuer, email.casefold()),
+                ).fetchone()
+                if (actor is None or actor["status"] != "active"
+                        or actor["oidc_subject"] not in (None, subject)):
+                    return {"status": "denied", "reason": "actor_unavailable"}
+                data = self._snapshot(conn, str(release["release_id"]))
+                seats = {str(s["seat_id"]): s for s in data["seats"]}
+                departments = {str(d["department_id"]): d for d in data["departments"]}
+                admin_seats = []
+                for assignment in data["actor_seats"]:
+                    if str(assignment["actor_id"]) != actor["actor_id"]:
+                        continue
+                    if assignment["active_from"] > now or (
+                            assignment["active_until"] is not None
+                            and assignment["active_until"] <= now):
+                        continue
+                    seat = seats.get(str(assignment["seat_id"]))
+                    if seat and seat["status"] == "active" and seat["seat_type"] == "admin":
+                        admin_seats.append(seat)
+                actions = []
+                scopes = {}
+                for action in sorted(data["org_actions"], key=lambda item: item["code"]):
+                    level = action["default_authority"]
+                    allowed = bool(actor["founder"] if level == "founder" else
+                                   actor["super_admin"] if level == "super_admin" else
+                                   (actor["super_admin"] or admin_seats) if level == "admin" else False)
+                    if not allowed and action["delegable"]:
+                        allowed = decide(data, Request(actor["actor_id"], "org_action",
+                                                       str(action["action_id"]), "invoke"), now).allowed
+                    if allowed:
+                        actions.append(action["code"])
+                        scopes[action["code"]] = (
+                            ["provider-specific"] if action["scope_kind"] == "provider" else
+                            ["organization"] if actor["super_admin"] or action["scope_kind"] == "organization"
+                            else sorted({departments[str(seat["department_id"])]["name"]
+                                         for seat in admin_seats})
+                        )
+                return {"status": "ready", "release": release["core_commit"],
+                        "actions": actions, "scopes": scopes}
 
     def visible_resources(self, *, issuer: str, subject: str, email: str) -> dict:
         """Return only registered resources readable by this verified Actor."""

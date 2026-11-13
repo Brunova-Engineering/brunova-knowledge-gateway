@@ -1,5 +1,6 @@
 """Local PostgreSQL integration; set PANKY_V2_TEST_DSN for a disposable DB."""
 
+import asyncio
 import os
 from datetime import datetime, timezone
 
@@ -8,8 +9,9 @@ import pytest
 
 from policy_backend_v2.decision import Request
 from policy_backend_v2.models import Policy, ContextNode, Grant
-from policy_backend_v2.publication import activate
+from policy_backend_v2.publication import activate, stable
 from policy_backend_v2.store import PolicyStoreV2
+from policy_backend_v2.governance import GovernanceStore
 
 
 @pytest.fixture
@@ -104,6 +106,440 @@ def test_same_active_core_commit_can_retry_publication_safely(db):
     assert activate(db, policy, registry, topology, "f" * 40) == first
     with psycopg.connect(db) as conn:
         assert conn.execute("SELECT count(*) FROM panky_policy_releases").fetchone()[0] == 1
+
+
+def test_action_catalog_is_scoped_and_delegation_is_published(db):
+    policy, registry, topology = example()
+    payload = policy.model_dump(mode="python")
+    for seat in payload["seats"]:
+        seat["seat_type"] = "admin" if seat["code"] == "management_01" else "basic"
+    policy = Policy.model_validate(payload)
+    activate(db, policy, registry, topology, "e" * 40)
+    store = PolicyStoreV2(db)
+    proof = {"issuer": "https://accounts.google.com", "subject": "verified-dev",
+             "email": "dev@example.invalid"}
+    before = store.available_org_actions(**proof)
+    assert before["status"] == "ready" and before["actions"] == []
+    manager = store.available_org_actions(issuer=proof["issuer"], subject="verified-nat",
+                                          email="nat@example.invalid")
+    assert "department.manage" in manager["actions"]
+    assert "super_admin.appoint" not in manager["actions"]
+    assert manager["scopes"]["department.manage"] == ["Management"]
+    action_id = str(stable("org_action", "tool.register"))
+    assert not store.decide(issuer=proof["issuer"], subject=proof["subject"],
+                            email=proof["email"], request=Request("act_dev_001", "org_action",
+                            action_id, "invoke"), request_id="before", preview=True)["allowed"]
+    payload["grants"].append({"subject_kind": "seat", "subject": "dev_01",
+                              "target_kind": "org_action", "target": "tool.register",
+                              "operation": "invoke", "effect": "allow",
+                              "valid_from": datetime(2026, 11, 1, tzinfo=timezone.utc),
+                              "reason": "Developer registers connected tools",
+                              "approved_by": "act_jorge"})
+    delegated = Policy.model_validate(payload)
+    activate(db, delegated, registry, topology, "d" * 40)
+    after = store.available_org_actions(**proof)
+    assert after["actions"] == ["tool.register"]
+    assert after["scopes"]["tool.register"] == ["organization"]
+    decision = store.decide(issuer=proof["issuer"], subject=proof["subject"],
+                            email=proof["email"], request=Request("act_dev_001", "org_action",
+                            action_id, "invoke"), request_id="after", preview=True)
+    assert decision["allowed"] and decision["reason"] == "grant"
+    assert "tool.register" not in manager["actions"]
+
+
+def test_org_action_migration_is_repeatable(db):
+    migration = os.path.join(os.path.dirname(__file__), "..", "migrations",
+                             "0006_org_action_catalog.sql")
+    sql = open(migration, encoding="utf-8").read()
+    with psycopg.connect(db) as conn:
+        conn.execute(sql)
+        conn.execute(sql)
+        assert conn.execute("SELECT count(*) FROM panky_org_actions").fetchone()[0] == 11
+        assert conn.execute(
+            "SELECT count(*) FROM panky_org_actions WHERE code='tool.register' AND delegable"
+        ).fetchone()[0] == 1
+
+
+def test_developer_grant_registers_connected_tool_only_after_core_publication(db):
+    from app.main import _connected_provider_operations
+    operations = asyncio.run(_connected_provider_operations("acquisition"))
+    assert operations == ["read"]
+    base, registry, topology = example()
+    payload = base.model_dump(mode="python")
+    payload["schema_version"] = 3
+    payload["founder_actor_id"] = "act_jorge"
+    owners = {"hq_drive": "dev_01", "finance_drive": "finance_contributor"}
+    for resource in payload["resources"]:
+        resource["owner_seat"] = owners[resource["code"]]
+    for seat in payload["seats"]:
+        seat["seat_type"] = "basic"
+    payload["grants"].append({
+        "subject_kind": "seat", "subject": "dev_01", "target_kind": "org_action",
+        "target": "tool.register", "operation": "invoke", "effect": "allow",
+        "valid_from": datetime(2026, 11, 1, tzinfo=timezone.utc),
+        "reason": "Register connected business tools", "approved_by": "act_jorge",
+    })
+    base = Policy.model_validate(payload)
+    activate(db, base, registry, topology, "1" * 40)
+    proof = {"issuer": "https://accounts.google.com", "subject": "dev-proof",
+             "email": "dev@example.invalid"}
+    governance = GovernanceStore(db)
+    result = governance.request_tool_registration(
+        **proof, provider="acquisition", operations=operations,
+        via_seat_id=stable("seat", "dev_01"), reason="Use connected prospecting tools")
+    assert result["status"] == "approved" and result["effective"] is False
+    assert governance.approved_for_core()["tools"] == [
+        {"request_id": result["request_id"], "provider": "acquisition", "operations": ["read"]}
+    ]
+    with psycopg.connect(db) as conn:
+        assert conn.execute("SELECT 1 FROM panky_tools WHERE code='acquisition'").fetchone() is None
+    updated = base.model_dump(mode="python")
+    updated["tools"].append({"code": "acquisition", "provider": "acquisition",
+                              "operations": operations})
+    activate(db, Policy.model_validate(updated), registry, topology, "2" * 40)
+    with psycopg.connect(db) as conn:
+        assert conn.execute(
+            "SELECT status FROM panky_tools WHERE code='acquisition'"
+        ).fetchone()[0] == "active"
+        assert conn.execute(
+            "SELECT activated_release_id IS NOT NULL FROM panky_tool_registration_requests "
+            "WHERE request_id=%s", (result["request_id"],)
+        ).fetchone()[0] is True
+    assert governance.approved_for_core()["tools"] == []
+    retired = updated.copy()
+    retired["tools"] = [tool for tool in updated["tools"] if tool["code"] != "acquisition"]
+    activate(db, Policy.model_validate(retired), registry, topology, "3" * 40)
+    with psycopg.connect(db) as conn:
+        assert conn.execute(
+            "SELECT 1 FROM panky_tools WHERE code='acquisition' AND status='active'"
+        ).fetchone() is None
+
+
+def test_tool_registration_migration_is_repeatable(db):
+    migration = os.path.join(os.path.dirname(__file__), "..", "migrations",
+                             "0007_tool_registration_requests.sql")
+    sql = open(migration, encoding="utf-8").read()
+    with psycopg.connect(db) as conn:
+        conn.execute(sql)
+        conn.execute(sql)
+        assert conn.execute(
+            "SELECT count(*) FROM information_schema.tables "
+            "WHERE table_name='panky_tool_registration_requests'"
+        ).fetchone()[0] == 1
+
+
+def test_delegated_tool_retirement_requires_publication_and_no_dependents(db):
+    base, registry, topology = example()
+    payload = base.model_dump(mode="python")
+    payload["schema_version"] = 3
+    payload["founder_actor_id"] = "act_jorge"
+    for seat in payload["seats"]:
+        seat["seat_type"] = "basic"
+    for resource in payload["resources"]:
+        resource["owner_seat"] = {"hq_drive": "dev_01",
+                                   "finance_drive": "finance_contributor"}[resource["code"]]
+    payload["tools"].append({"code": "acquisition", "provider": "acquisition",
+                             "operations": ["read"]})
+    payload["grants"].append({
+        "subject_kind": "seat", "subject": "dev_01", "target_kind": "org_action",
+        "target": "tool.retire", "operation": "invoke", "effect": "allow",
+        "valid_from": datetime(2026, 11, 1, tzinfo=timezone.utc),
+        "reason": "Retire connected test tools", "approved_by": "act_jorge",
+    })
+    base = Policy.model_validate(payload)
+    activate(db, base, registry, topology, "4" * 40)
+    governance = GovernanceStore(db)
+    proof = {"issuer": "https://accounts.google.com", "subject": "dev-proof",
+             "email": "dev@example.invalid"}
+    with pytest.raises(ValueError, match="dependents"):
+        governance.request_tool_retirement(
+            **proof, provider="workspace", via_seat_id=stable("seat", "dev_01"),
+            reason="Retire the old workspace")
+    receipt = governance.request_tool_retirement(
+        **proof, provider="acquisition", via_seat_id=stable("seat", "dev_01"),
+        reason="No longer use prospecting")
+    assert receipt["status"] == "approved" and receipt["effective"] is False
+    assert governance.approved_for_core()["tools_retire"] == [
+        {"request_id": receipt["request_id"], "provider": "acquisition"}]
+    with psycopg.connect(db) as conn:
+        assert conn.execute(
+            "SELECT status FROM panky_tools WHERE code='acquisition'"
+        ).fetchone()[0] == "active"
+    retired = base.model_dump(mode="python")
+    retired["tools"] = [tool for tool in retired["tools"]
+                        if tool["code"] != "acquisition"]
+    activate(db, Policy.model_validate(retired), registry, topology, "5" * 40)
+    with psycopg.connect(db) as conn:
+        assert conn.execute(
+            "SELECT 1 FROM panky_tools WHERE code='acquisition' AND status='active'"
+        ).fetchone() is None
+        assert conn.execute(
+            "SELECT activated_release_id IS NOT NULL "
+            "FROM panky_tool_retirement_requests WHERE request_id=%s",
+            (receipt["request_id"],),
+        ).fetchone()[0] is True
+    assert governance.approved_for_core()["tools_retire"] == []
+
+
+def test_tool_retirement_migration_is_repeatable(db):
+    migration = os.path.join(os.path.dirname(__file__), "..", "migrations",
+                             "0008_tool_retirement_requests.sql")
+    sql = open(migration, encoding="utf-8").read()
+    with psycopg.connect(db) as conn:
+        conn.execute(sql)
+        conn.execute(sql)
+        assert conn.execute(
+            "SELECT count(*) FROM information_schema.tables "
+            "WHERE table_name='panky_tool_retirement_requests'"
+        ).fetchone()[0] == 1
+
+
+def test_retired_resource_does_not_block_tool_retirement(db):
+    base, registry, topology = example()
+    payload = base.model_dump(mode="python")
+    payload["schema_version"] = 3
+    payload["founder_actor_id"] = "act_jorge"
+    for seat in payload["seats"]:
+        seat["seat_type"] = "basic"
+    for resource in payload["resources"]:
+        resource["owner_seat"] = {"hq_drive": "dev_01",
+                                  "finance_drive": "finance_contributor"}[resource["code"]]
+    payload["tools"].append({"code": "acquisition", "provider": "acquisition",
+                             "operations": ["read"]})
+    payload["resources"].append({
+        "code": "retired_probe", "tool": "acquisition", "resource_kind": "source",
+        "external_ref": "retired-probe", "owner_department": "hq",
+        "owner_seat": "dev_01"})
+    payload["grants"].append({
+        "subject_kind": "seat", "subject": "dev_01", "target_kind": "org_action",
+        "target": "tool.retire", "operation": "invoke", "effect": "allow",
+        "valid_from": datetime(2026, 11, 1, tzinfo=timezone.utc),
+        "reason": "Retire test tools", "approved_by": "act_jorge",
+    })
+    activate(db, Policy.model_validate(payload), registry, topology, "6" * 40)
+    without_resource = payload.copy()
+    without_resource["resources"] = [item for item in payload["resources"]
+                                     if item["code"] != "retired_probe"]
+    activate(db, Policy.model_validate(without_resource), registry, topology, "7" * 40)
+    governance = GovernanceStore(db)
+    receipt = governance.request_tool_retirement(
+        issuer="https://accounts.google.com", subject="dev-proof",
+        email="dev@example.invalid", provider="acquisition",
+        via_seat_id=stable("seat", "dev_01"), reason="No longer use prospecting")
+    without_tool = without_resource.copy()
+    without_tool["tools"] = [item for item in without_resource["tools"]
+                             if item["code"] != "acquisition"]
+    activate(db, Policy.model_validate(without_tool), registry, topology, "8" * 40)
+    with psycopg.connect(db) as conn:
+        assert conn.execute("SELECT status FROM panky_tools WHERE code='acquisition'").fetchone()[0] == "disabled"
+        assert conn.execute("SELECT status FROM panky_resources WHERE code='retired_probe'").fetchone()[0] == "disabled"
+        assert conn.execute("SELECT activated_release_id IS NOT NULL FROM panky_tool_retirement_requests WHERE request_id=%s",
+                            (receipt["request_id"],)).fetchone()[0] is True
+
+
+def test_owner_retires_resource_registration_after_core_publication(db):
+    base, registry, topology = example()
+    payload = base.model_dump(mode="python")
+    payload["schema_version"] = 3
+    payload["founder_actor_id"] = "act_jorge"
+    for seat in payload["seats"]:
+        seat["seat_type"] = "basic"
+    for resource in payload["resources"]:
+        resource["owner_seat"] = {"hq_drive": "dev_01",
+                                  "finance_drive": "finance_contributor"}[resource["code"]]
+    activate(db, Policy.model_validate(payload), registry, topology, "9" * 40)
+    governance = GovernanceStore(db)
+    receipt = governance.request_resource_retirement(
+        issuer="https://accounts.google.com", subject="dev-proof",
+        email="dev@example.invalid", resource_id=stable("resource", "hq_drive"),
+        via_seat_id=stable("seat", "dev_01"), reason="No longer catalog this drive")
+    assert receipt["effective"] is False
+    assert governance.approved_for_core()["resources_retire"] == [
+        {"request_id": receipt["request_id"], "resource": "hq_drive"}]
+    retired = payload.copy()
+    retired["resources"] = [item for item in payload["resources"]
+                            if item["code"] != "hq_drive"]
+    retired["grants"] = [item for item in payload["grants"]
+                         if not (item["target_kind"] == "external_resource"
+                                 and item["target"] == "hq_drive")]
+    activate(db, Policy.model_validate(retired), registry, topology, "a" * 40)
+    with psycopg.connect(db) as conn:
+        assert conn.execute("SELECT status FROM panky_resources WHERE code='hq_drive'").fetchone()[0] == "disabled"
+        assert conn.execute("SELECT activated_release_id IS NOT NULL FROM panky_resource_retirement_requests WHERE request_id=%s",
+                            (receipt["request_id"],)).fetchone()[0] is True
+        assert conn.execute("SELECT count(*) FROM panky_policy_releases").fetchone()[0] == 2
+
+
+def test_resource_retirement_does_not_borrow_another_seat(db):
+    base, registry, topology = example()
+    payload = base.model_dump(mode="python")
+    payload["schema_version"] = 3
+    payload["founder_actor_id"] = "act_jorge"
+    for seat in payload["seats"]:
+        seat["seat_type"] = "basic"
+    for resource in payload["resources"]:
+        resource["owner_seat"] = {"hq_drive": "dev_01",
+                                  "finance_drive": "finance_contributor"}[resource["code"]]
+    activate(db, Policy.model_validate(payload), registry, topology, "d" * 40)
+    governance = GovernanceStore(db)
+    proof = {"issuer": "https://accounts.google.com", "subject": "dev-proof",
+             "email": "dev@example.invalid"}
+    with pytest.raises(ValueError, match="admin_seat_required"):
+        governance.request_resource_retirement(
+            **proof, resource_id=stable("resource", "hq_drive"),
+            via_seat_id=stable("seat", "finance_contributor"),
+            reason="Do not catalog this drive")
+    receipt = governance.request_resource_retirement(
+        **proof, resource_id=stable("resource", "hq_drive"),
+        via_seat_id=stable("seat", "dev_01"), reason="Do not catalog this drive")
+    assert receipt["status"] == "approved"
+
+
+def test_resource_retirement_migration_is_repeatable(db):
+    migration = os.path.join(os.path.dirname(__file__), "..", "migrations",
+                             "0010_resource_retirement_requests.sql")
+    sql = open(migration, encoding="utf-8").read()
+    with psycopg.connect(db) as conn:
+        conn.execute(sql)
+        conn.execute(sql)
+        assert conn.execute(
+            "SELECT count(*) FROM information_schema.tables "
+            "WHERE table_name='panky_resource_retirement_requests'"
+        ).fetchone()[0] == 1
+
+
+def test_admin_retires_actor_in_own_subtree_after_publication(db):
+    base, registry, topology = example()
+    payload = base.model_dump(mode="python")
+    payload["schema_version"] = 3
+    payload["founder_actor_id"] = "act_jorge"
+    for seat in payload["seats"]:
+        seat["seat_type"] = "admin" if seat["code"] == "management_01" else "basic"
+    for resource in payload["resources"]:
+        resource["owner_seat"] = {"hq_drive": "dev_01",
+                                  "finance_drive": "finance_contributor"}[resource["code"]]
+    activate(db, Policy.model_validate(payload), registry, topology, "f" * 40)
+    governance = GovernanceStore(db)
+    receipt = governance.request_entity_retirement(
+        issuer="https://accounts.google.com", subject="nat-proof",
+        email="nat@example.invalid", entity_kind="actor",
+        entity_code="act_dev_001", via_seat_id=stable("seat", "management_01"),
+        reason="Developer has left the company")
+    assert receipt["effective"] is False
+    assert governance.approved_for_core()["entities_retire"] == [
+        {"request_id": receipt["request_id"], "kind": "actor",
+         "code": "act_dev_001"}]
+    updated = payload.copy()
+    updated["actors"] = [item for item in payload["actors"]
+                         if item["actor_id"] != "act_dev_001"]
+    updated["seats"] = [{**seat, "occupants": []}
+                        if "act_dev_001" in seat["occupants"] else seat
+                        for seat in payload["seats"]]
+    updated["grants"] = [item for item in payload["grants"]
+                         if not (item["subject_kind"] == "actor"
+                                 and item["subject"] == "act_dev_001")]
+    registry["actors"]["act_dev_001"]["status"] = "disabled"
+    for record in topology["_seats"].values():
+        record["occupied_by"] = [actor_id for actor_id in record["occupied_by"]
+                                  if actor_id != "act_dev_001"]
+    activate(db, Policy.model_validate(updated), registry, topology, "0" * 40)
+    with psycopg.connect(db) as conn:
+        assert conn.execute("SELECT status FROM panky_actors WHERE actor_id='act_dev_001'").fetchone()[0] == "disabled"
+        assert conn.execute("SELECT activated_release_id IS NOT NULL FROM panky_entity_retirement_requests WHERE request_id=%s",
+                            (receipt["request_id"],)).fetchone()[0] is True
+    denied = PolicyStoreV2(db).context_catalog(
+        issuer="https://accounts.google.com", subject="dev-proof",
+        email="dev@example.invalid")
+    assert denied == {"status": "denied", "reason": "actor_disabled"}
+
+
+def test_entity_retirement_rejects_unscoped_or_dependent_targets(db):
+    base, registry, topology = example()
+    payload = base.model_dump(mode="python")
+    payload["schema_version"] = 3
+    payload["founder_actor_id"] = "act_jorge"
+    for seat in payload["seats"]:
+        seat["seat_type"] = "admin" if seat["code"] == "management_01" else "basic"
+    for resource in payload["resources"]:
+        resource["owner_seat"] = {"hq_drive": "dev_01",
+                                  "finance_drive": "finance_contributor"}[resource["code"]]
+    activate(db, Policy.model_validate(payload), registry, topology, "1" * 40)
+    governance = GovernanceStore(db)
+    with pytest.raises(ValueError, match="entity_unavailable"):
+        governance.request_entity_retirement(
+            issuer="https://accounts.google.com", subject="dev-proof",
+            email="dev@example.invalid", entity_kind="actor",
+            entity_code="act_nat", via_seat_id=stable("seat", "dev_01"),
+            reason="Remove another branch's manager")
+    with pytest.raises(ValueError, match="entity_has_dependents"):
+        governance.request_entity_retirement(
+            issuer="https://accounts.google.com", subject="nat-proof",
+            email="nat@example.invalid", entity_kind="seat",
+            entity_code="dev_01", via_seat_id=stable("seat", "management_01"),
+            reason="Retire an occupied seat")
+    with pytest.raises(ValueError, match="entity_unavailable"):
+        governance.request_entity_retirement(
+            issuer="https://accounts.google.com", subject="nat-proof",
+            email="nat@example.invalid", entity_kind="actor",
+            entity_code="act_jorge", via_seat_id=stable("seat", "management_01"),
+            reason="Retire the Founder")
+
+
+def test_entity_retirement_migration_is_repeatable(db):
+    migration = os.path.join(os.path.dirname(__file__), "..", "migrations",
+                             "0011_entity_retirement_requests.sql")
+    sql = open(migration, encoding="utf-8").read()
+    with psycopg.connect(db) as conn:
+        conn.execute(sql)
+        conn.execute(sql)
+        assert conn.execute(
+            "SELECT count(*) FROM information_schema.tables "
+            "WHERE table_name='panky_entity_retirement_requests'"
+        ).fetchone()[0] == 1
+
+
+def test_admin_archives_subcontext_in_own_subtree(db):
+    base, registry, topology = example()
+    payload = base.model_dump(mode="python")
+    payload["schema_version"] = 3
+    payload["founder_actor_id"] = "act_jorge"
+    for seat in payload["seats"]:
+        seat["seat_type"] = "admin" if seat["code"] == "management_01" else "basic"
+    for resource in payload["resources"]:
+        resource["owner_seat"] = {"hq_drive": "dev_01",
+                                  "finance_drive": "finance_contributor"}[resource["code"]]
+    activate(db, Policy.model_validate(payload), registry, topology, "2" * 40)
+    governance = GovernanceStore(db)
+    receipt = governance.request_entity_retirement(
+        issuer="https://accounts.google.com", subject="nat-proof",
+        email="nat@example.invalid", entity_kind="subcontext",
+        entity_code="ctx_budget", via_seat_id=stable("seat", "management_01"),
+        reason="Archive the old budget context")
+    assert receipt["status"] == "approved"
+    updated = payload.copy()
+    updated["context_nodes"] = [
+        {**node, "lifecycle": "archived"} if node["node_id"] == "ctx_budget"
+        else node for node in payload["context_nodes"]]
+    updated["grants"] = [item for item in payload["grants"]
+                         if not (item["target_kind"] == "context_node"
+                                 and item["target"] == "ctx_budget")]
+    activate(db, Policy.model_validate(updated), registry, topology, "3" * 40)
+    with psycopg.connect(db) as conn:
+        assert conn.execute("SELECT lifecycle FROM panky_context_nodes WHERE node_id='ctx_budget'").fetchone()[0] == "archived"
+        assert conn.execute("SELECT activated_release_id IS NOT NULL FROM panky_entity_retirement_requests WHERE request_id=%s",
+                            (receipt["request_id"],)).fetchone()[0] is True
+
+
+def test_department_lifecycle_migration_is_repeatable(db):
+    migration = os.path.join(os.path.dirname(__file__), "..", "migrations",
+                             "0009_department_lifecycle.sql")
+    sql = open(migration, encoding="utf-8").read()
+    with psycopg.connect(db) as conn:
+        conn.execute(sql)
+        conn.execute(sql)
+        assert conn.execute(
+            "SELECT status FROM panky_departments LIMIT 1"
+        ).description[0].name == "status"
 
 
 def test_catalog_follows_release_and_oidc_scope(db):
