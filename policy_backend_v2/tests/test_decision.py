@@ -167,6 +167,26 @@ def test_unavailable_and_unknown_actions_have_same_public_answer():
         "allowed": False, "reason": "not_available"}
 
 
+def test_tool_retirement_uses_the_closed_action_decision():
+    seen = []
+
+    class Database:
+        def actor_for_oidc(self, issuer, email):
+            return "jorge"
+
+        def decide(self, **kwargs):
+            seen.append(kwargs["request"])
+            return {"allowed": True, "reason": "super_admin"}
+
+    actor = ActorProof(issuer="https://accounts.google.com", subject="proof",
+                       email="jorge@example.invalid")
+    result = decide_org_action(OrgActionRequest(actor=actor, action="tool.retire",
+                                                request_id="retire-tool"), None, Database())
+    assert result == {"allowed": True, "reason": "super_admin"}
+    assert seen[0].target_id == str(stable("org_action", "tool.retire"))
+    assert seen[0].operation == "invoke"
+
+
 def test_owned_resource_is_private_to_owner_seat_and_ancestor_admin_until_granted():
     data = fixture()
     for seat in data["seats"]:
