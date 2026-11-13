@@ -128,6 +128,7 @@ class GatewayAuthenticationMiddleware:
         elif principal.type == "panky" and not (
             request.url.path.startswith("/mcp")
             or request.url.path in {"/panky/context/catalog", "/panky/context/decide",
+                                    "/panky/org-action/catalog",
                                     "/panky/context/uses/complete",
                                     "/panky/governance/action",
                                     "/panky/governance/inbox"}

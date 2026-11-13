@@ -208,6 +208,32 @@ def context_catalog(identity: PankyIdentity) -> dict:
         raise PankyBridgeError("Panky 2.0 context catalog is unavailable") from None
 
 
+def org_action_catalog(identity: PankyIdentity) -> dict:
+    """Return only actions the verified Actor can currently use."""
+    base = os.getenv("PANKY_POLICY_BACKEND_URL", "")
+    if not base.startswith("https://") or policy_v2_mode() != "enforce":
+        raise PankyBridgeError("Action catalog is unavailable")
+    try:
+        token = id_token.fetch_id_token(GoogleRequest(), base)
+        response = httpx.post(
+            f"{base.rstrip('/')}/v2/org-action/catalog",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"issuer": identity.issuer, "subject": identity.subject,
+                  "email": identity.email}, timeout=5,
+        )
+        response.raise_for_status()
+        result = response.json()
+        if (result.get("status") != "ready" or not isinstance(result.get("release"), str)
+                or not isinstance(result.get("actions"), list)
+                or not all(isinstance(action, str) for action in result["actions"])
+                or not isinstance(result.get("scopes"), dict)
+                or set(result["scopes"]) != set(result["actions"])):
+            raise ValueError("Invalid scoped action catalog")
+        return result
+    except (httpx.HTTPError, ValueError, TypeError, KeyError):
+        raise PankyBridgeError("Action catalog is unavailable") from None
+
+
 def context_decision(identity: PankyIdentity, *, node_id: str, surface: str,
                      operation: str, request_id: str, preview: bool = False) -> dict:
     """Ask the active policy service before an organizational context action."""

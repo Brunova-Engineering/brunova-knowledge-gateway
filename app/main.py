@@ -49,7 +49,7 @@ from app.source_registry import SourceRegistry, SourceRegistryMetadata
 from app.auth.pubsub_push import parse_pubsub_signal, verify_pubsub_oidc
 from app.agent_signals import AgentSignalInbox
 from app.runtime import get_runtime_gateway
-from app.auth.panky_bridge import PankyBridgeError, PankyIdentity, context_catalog, context_decision, governance_action, governance_inbox, issue_access_token
+from app.auth.panky_bridge import PankyBridgeError, PankyIdentity, context_catalog, context_decision, governance_action, governance_inbox, issue_access_token, org_action_catalog
 from pydantic import BaseModel
 
 
@@ -111,6 +111,20 @@ def panky_context_catalog(request: Request):
                                              principal.oidc_email))
     except PankyBridgeError:
         raise HTTPException(503, "Context catalog is unavailable") from None
+
+
+@app.get("/panky/org-action/catalog")
+def panky_org_action_catalog(request: Request):
+    principal = getattr(request.state, "principal", None)
+    if (principal is None or principal.type != "panky"
+            or not principal.oidc_subject or not principal.oidc_email):
+        raise HTTPException(403, "Panky OIDC identity is required")
+    try:
+        return org_action_catalog(PankyIdentity("https://accounts.google.com",
+                                                principal.oidc_subject,
+                                                principal.oidc_email))
+    except PankyBridgeError:
+        raise HTTPException(503, "Action catalog is unavailable") from None
 
 
 @app.post("/panky/governance/action")

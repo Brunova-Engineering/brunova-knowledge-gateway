@@ -8,7 +8,7 @@ import pytest
 
 from policy_backend_v2.decision import Request
 from policy_backend_v2.models import Policy, ContextNode, Grant
-from policy_backend_v2.publication import activate
+from policy_backend_v2.publication import activate, stable
 from policy_backend_v2.store import PolicyStoreV2
 
 
@@ -104,6 +104,58 @@ def test_same_active_core_commit_can_retry_publication_safely(db):
     assert activate(db, policy, registry, topology, "f" * 40) == first
     with psycopg.connect(db) as conn:
         assert conn.execute("SELECT count(*) FROM panky_policy_releases").fetchone()[0] == 1
+
+
+def test_action_catalog_is_scoped_and_delegation_is_published(db):
+    policy, registry, topology = example()
+    payload = policy.model_dump(mode="python")
+    for seat in payload["seats"]:
+        seat["seat_type"] = "admin" if seat["code"] == "management_01" else "basic"
+    policy = Policy.model_validate(payload)
+    activate(db, policy, registry, topology, "e" * 40)
+    store = PolicyStoreV2(db)
+    proof = {"issuer": "https://accounts.google.com", "subject": "verified-dev",
+             "email": "dev@example.invalid"}
+    before = store.available_org_actions(**proof)
+    assert before["status"] == "ready" and before["actions"] == []
+    manager = store.available_org_actions(issuer=proof["issuer"], subject="verified-nat",
+                                          email="nat@example.invalid")
+    assert "department.manage" in manager["actions"]
+    assert "super_admin.appoint" not in manager["actions"]
+    assert manager["scopes"]["department.manage"] == ["Management"]
+    action_id = str(stable("org_action", "tool.register"))
+    assert not store.decide(issuer=proof["issuer"], subject=proof["subject"],
+                            email=proof["email"], request=Request("act_dev_001", "org_action",
+                            action_id, "invoke"), request_id="before", preview=True)["allowed"]
+    payload["grants"].append({"subject_kind": "seat", "subject": "dev_01",
+                              "target_kind": "org_action", "target": "tool.register",
+                              "operation": "invoke", "effect": "allow",
+                              "valid_from": datetime(2026, 11, 1, tzinfo=timezone.utc),
+                              "reason": "Developer registers connected tools",
+                              "approved_by": "act_jorge"})
+    delegated = Policy.model_validate(payload)
+    activate(db, delegated, registry, topology, "d" * 40)
+    after = store.available_org_actions(**proof)
+    assert after["actions"] == ["tool.register"]
+    assert after["scopes"]["tool.register"] == ["organization"]
+    decision = store.decide(issuer=proof["issuer"], subject=proof["subject"],
+                            email=proof["email"], request=Request("act_dev_001", "org_action",
+                            action_id, "invoke"), request_id="after", preview=True)
+    assert decision["allowed"] and decision["reason"] == "grant"
+    assert "tool.register" not in manager["actions"]
+
+
+def test_org_action_migration_is_repeatable(db):
+    migration = os.path.join(os.path.dirname(__file__), "..", "migrations",
+                             "0006_org_action_catalog.sql")
+    sql = open(migration, encoding="utf-8").read()
+    with psycopg.connect(db) as conn:
+        conn.execute(sql)
+        conn.execute(sql)
+        assert conn.execute("SELECT count(*) FROM panky_org_actions").fetchone()[0] == 10
+        assert conn.execute(
+            "SELECT count(*) FROM panky_org_actions WHERE code='tool.register' AND delegable"
+        ).fetchone()[0] == 1
 
 
 def test_catalog_follows_release_and_oidc_scope(db):

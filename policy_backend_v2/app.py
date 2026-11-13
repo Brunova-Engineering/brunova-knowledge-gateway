@@ -52,6 +52,13 @@ class ContextRequest(BaseModel):
     preview: bool = False
 
 
+class OrgActionRequest(BaseModel):
+    actor: ActorProof
+    action: str = Field(min_length=1)
+    request_id: str = Field(min_length=1)
+    preview: bool = False
+
+
 class Completion(BaseModel):
     reservation_id: UUID
     request_id: str = Field(min_length=1)
@@ -240,6 +247,37 @@ def decide_context(item: ContextRequest, _: None = Depends(require_gateway),
         )
     except Exception:
         raise HTTPException(503, "Policy decision is unavailable") from None
+
+
+@app.post("/v2/org-action/decide")
+def decide_org_action(item: OrgActionRequest, _: None = Depends(require_gateway),
+                      database: PolicyStoreV2 = Depends(store)) -> dict:
+    # The catalog is closed. Other organizational changes have their own
+    # governance routes and cannot be opened by a generic decision request.
+    if item.action != "tool.register":
+        return {"allowed": False, "reason": "not_available"}
+    try:
+        actor_id = database.actor_for_oidc(item.actor.issuer, item.actor.email)
+        if actor_id is None:
+            return {"allowed": False, "reason": "actor_unknown"}
+        result = database.decide(
+            issuer=item.actor.issuer, subject=item.actor.subject, email=item.actor.email,
+            request=Request(actor_id, "org_action", str(stable("org_action", item.action)), "invoke"),
+            request_id=item.request_id, preview=item.preview,
+        )
+        return result if result["allowed"] else {"allowed": False, "reason": "not_available"}
+    except Exception:
+        raise HTTPException(503, "Policy decision is unavailable") from None
+
+
+@app.post("/v2/org-action/catalog")
+def org_action_catalog(item: ActorProof, _: None = Depends(require_gateway),
+                       database: PolicyStoreV2 = Depends(store)) -> dict:
+    try:
+        return database.available_org_actions(issuer=item.issuer, subject=item.subject,
+                                              email=item.email)
+    except Exception:
+        raise HTTPException(503, "Action catalog is unavailable") from None
 
 
 @app.post("/v2/context/catalog")

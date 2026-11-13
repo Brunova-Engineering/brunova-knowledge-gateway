@@ -9,6 +9,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from .models import Policy
+from .org_actions import CATALOG
 
 
 NAMESPACE = UUID("8de4d0f8-35db-4ae0-bff9-b311e941b5ae")
@@ -94,6 +95,9 @@ def verify_core(policy: Policy, registry: dict, topology: dict) -> None:
                 raise ValueError("A non-super-admin cannot occupy an untyped Seat")
     if policy.schema_version == 3 and "super_admin" not in registered[policy.founder_actor_id].get("roles", []):
         raise ValueError("Founder must be a Core super admin")
+    for grant in policy.grants:
+        if grant.target_kind == "org_action" and "super_admin" not in registered[grant.approved_by].get("roles", []):
+            raise ValueError("Organizational action delegation requires a Core super admin approver")
 
 
 def _node_repository(core_node: dict) -> dict:
@@ -451,6 +455,16 @@ def activate(dsn: str, policy: Policy, registry: dict, topology: dict,
                 "WHERE request_id=ANY(%s)",
                 (release_id, approved_resource_grants),
             )
+        for action in CATALOG.values():
+            conn.execute(
+                "INSERT INTO panky_org_actions(action_id,code,default_authority,scope_kind,delegable,governed_only) "
+                "VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT(action_id) DO UPDATE SET "
+                "code=EXCLUDED.code,default_authority=EXCLUDED.default_authority,"
+                "scope_kind=EXCLUDED.scope_kind,delegable=EXCLUDED.delegable,"
+                "governed_only=EXCLUDED.governed_only",
+                (stable("org_action", action.code), action.code, action.default_authority,
+                 action.scope_kind, action.delegable, action.governed_only),
+            )
         for g in policy.grants:
             subject = {
                 "actor": (g.subject, None, None, None),
@@ -460,12 +474,13 @@ def activate(dsn: str, policy: Policy, registry: dict, topology: dict,
             }[g.subject_kind]
             conn.execute(
                 "INSERT INTO panky_grants(release_id,grant_id,subject_kind,actor_id,seat_id,"
-                "role_id,department_id,target_kind,resource_id,context_node_id,surface,operation,"
+                "role_id,department_id,target_kind,resource_id,context_node_id,org_action_id,surface,operation,"
                 "effect,include_descendants,valid_from,expires_at,max_uses,reason,approved_by) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (release_id, uuid4(), g.subject_kind, *subject, g.target_kind,
                  stable("resource", g.target) if g.target_kind == "external_resource" else None,
                  g.target if g.target_kind == "context_node" else None,
+                 stable("org_action", g.target) if g.target_kind == "org_action" else None,
                  g.surface, g.operation, g.effect, g.include_descendants,
                  g.valid_from, g.expires_at, g.max_uses, g.reason, g.approved_by),
             )

@@ -1,6 +1,8 @@
 from datetime import datetime, timezone
 
 from policy_backend_v2.decision import Request, decide
+from policy_backend_v2.publication import stable
+from policy_backend_v2.app import ActorProof, OrgActionRequest, decide_org_action
 
 
 NOW = datetime(2026, 11, 6, tzinfo=timezone.utc)
@@ -124,6 +126,43 @@ def test_own_seat_context_mutates_but_others_do_not():
 def test_super_admin_is_tenant_internal_bypass():
     data = fixture()
     assert decide(data, Request("jorge", "external_resource", "hq_drive", "delete"), NOW).reason == "super_admin"
+
+
+def test_tool_registration_requires_catalog_action_and_explicit_seat_grant():
+    data = fixture()
+    action_id = str(stable("org_action", "tool.register"))
+    data["org_actions"] = [{"action_id": action_id, "code": "tool.register",
+                            "delegable": True, "governed_only": False}]
+    data["seats"][1]["seat_type"] = "basic"
+    request = Request("dev", "org_action", action_id, "invoke")
+    assert decide(data, request, NOW).reason == "no_authorized_seat"
+    data["grants"].append({"grant_id": "tool-grant", "release_id": "release-2",
+                           "subject_kind": "seat", "seat_id": "s_dev", "target_kind": "org_action",
+                           "org_action_id": action_id, "operation": "invoke", "effect": "allow",
+                           "valid_from": NOW})
+    result = decide(data, request, NOW)
+    assert result.allowed and result.seat_id == "s_dev" and result.grant_id == "tool-grant"
+    assert not decide(data, Request("nat", "org_action", action_id, "invoke"), NOW).allowed
+    assert decide(data, Request("jorge", "org_action", action_id, "invoke"), NOW).reason == "super_admin"
+    assert not decide(data, Request("dev", "org_action", action_id, "delete"), NOW).allowed
+    assert not decide(data, Request("dev", "org_action", "invented-action", "invoke"), NOW).allowed
+
+
+def test_unavailable_and_unknown_actions_have_same_public_answer():
+    class Database:
+        def actor_for_oidc(self, issuer, email):
+            return "dev"
+
+        def decide(self, **kwargs):
+            return {"allowed": False, "reason": "no_authorized_seat"}
+
+    actor = ActorProof(issuer="https://accounts.google.com", subject="proof",
+                       email="dev@example.invalid")
+    def ask(action):
+        return decide_org_action(OrgActionRequest(actor=actor, action=action,
+                                                  request_id="request"), None, Database())
+    assert ask("tool.register") == ask("super_admin.appoint") == ask("made.up") == {
+        "allowed": False, "reason": "not_available"}
 
 
 def test_owned_resource_is_private_to_owner_seat_and_ancestor_admin_until_granted():

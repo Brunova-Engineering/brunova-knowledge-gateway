@@ -10,11 +10,13 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from .org_actions import CATALOG
+
 
 @dataclass(frozen=True)
 class Request:
     actor_id: str
-    target_kind: str  # external_resource | context_node
+    target_kind: str  # external_resource | context_node | org_action
     target_id: str
     operation: str
     surface: str | None = None
@@ -74,7 +76,12 @@ def _grant_matches(grant: dict, request: Request, seat: dict, *,
         return False
     if grant.get("expires_at") and now >= grant["expires_at"]:
         return False
-    if request.target_kind == "external_resource":
+    if request.target_kind == "org_action":
+        if grant["subject_kind"] != "seat" or grant["effect"] != "allow":
+            return False
+        if str(grant.get("org_action_id")) != request.target_id:
+            return False
+    elif request.target_kind == "external_resource":
         if str(grant.get("resource_id")) != request.target_id:
             return False
     else:
@@ -177,13 +184,20 @@ def _base_context(request: Request, seat: dict, data: dict,
 
 def decide(data: dict[str, list[dict]], request: Request, now: datetime | None = None) -> Decision:
     now = now or datetime.now(timezone.utc)
-    if request.target_kind not in {"external_resource", "context_node"}:
+    if request.target_kind not in {"external_resource", "context_node", "org_action"}:
         return Decision(False, "invalid_target")
     actors = _lookup(data["actors"], "actor_id")
     actor = actors.get(request.actor_id)
     if not actor or actor["status"] != "active":
         return Decision(False, "actor_unknown")
-    if request.target_kind == "context_node":
+    if request.target_kind == "org_action":
+        target = _lookup(data.get("org_actions", []), "action_id").get(request.target_id)
+        if (not target or target.get("code") not in CATALOG
+                or target.get("code") != "tool.register"
+                or not target.get("delegable") or target.get("governed_only")
+                or request.operation != "invoke" or request.surface is not None):
+            return Decision(False, "target_unavailable")
+    elif request.target_kind == "context_node":
         target = _lookup(data["context_nodes"], "node_id").get(request.target_id)
         if not target or target["lifecycle"] != "active" or request.surface is None:
             return Decision(False, "target_unavailable")
@@ -224,6 +238,8 @@ def decide(data: dict[str, list[dict]], request: Request, now: datetime | None =
                for g in grants):
             return Decision(False, "actor_deny")
     for seat in active:
+        if request.target_kind == "org_action" and seat.get("seat_type") not in {"basic", "admin"}:
+            continue
         if request.target_kind == "external_resource":
             if target.get("owner_seat_id") is not None and seat.get("seat_type") not in {"basic", "admin"}:
                 continue
@@ -237,7 +253,8 @@ def decide(data: dict[str, list[dict]], request: Request, now: datetime | None =
                         key=lambda g: str(g["grant_id"]))
         base = (_base_external(request, seat, data, departments) if
                 request.target_kind == "external_resource" else
-                _base_context(request, seat, data, departments, nodes))
+                _base_context(request, seat, data, departments, nodes) if
+                request.target_kind == "context_node" else False)
         if base or allows:
             selected = allows[0] if allows and not base else None
             return Decision(True, "grant" if selected else "base", str(seat["seat_id"]),
