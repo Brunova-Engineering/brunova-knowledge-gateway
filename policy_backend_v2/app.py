@@ -52,6 +52,13 @@ class ContextRequest(BaseModel):
     preview: bool = False
 
 
+class OrgActionRequest(BaseModel):
+    actor: ActorProof
+    action: str = Field(min_length=1)
+    request_id: str = Field(min_length=1)
+    preview: bool = False
+
+
 class Completion(BaseModel):
     reservation_id: UUID
     request_id: str = Field(min_length=1)
@@ -106,6 +113,36 @@ class ResourceGrantRequest(BaseModel):
     recipient_seat_id: str
     via_seat_id: str
     operation: str = Field(min_length=1)
+    reason: str = Field(min_length=3, max_length=1000)
+
+
+class ToolRegistrationRequest(BaseModel):
+    actor: ActorProof
+    provider: str = Field(min_length=1, max_length=64)
+    operations: list[str] = Field(min_length=1, max_length=16)
+    via_seat_id: str
+    reason: str = Field(min_length=3, max_length=1000)
+
+
+class ToolRetirementRequest(BaseModel):
+    actor: ActorProof
+    provider: str = Field(min_length=1, max_length=64)
+    via_seat_id: str
+    reason: str = Field(min_length=3, max_length=1000)
+
+
+class ResourceRetirementRequest(BaseModel):
+    actor: ActorProof
+    resource_id: str
+    via_seat_id: str
+    reason: str = Field(min_length=3, max_length=1000)
+
+
+class EntityRetirementRequest(BaseModel):
+    actor: ActorProof
+    entity_kind: str
+    entity_code: str
+    via_seat_id: str
     reason: str = Field(min_length=3, max_length=1000)
 
 
@@ -242,6 +279,37 @@ def decide_context(item: ContextRequest, _: None = Depends(require_gateway),
         raise HTTPException(503, "Policy decision is unavailable") from None
 
 
+@app.post("/v2/org-action/decide")
+def decide_org_action(item: OrgActionRequest, _: None = Depends(require_gateway),
+                      database: PolicyStoreV2 = Depends(store)) -> dict:
+    # The catalog is closed. Other organizational changes have their own
+    # governance routes and cannot be opened by a generic decision request.
+    if item.action != "tool.register":
+        return {"allowed": False, "reason": "not_available"}
+    try:
+        actor_id = database.actor_for_oidc(item.actor.issuer, item.actor.email)
+        if actor_id is None:
+            return {"allowed": False, "reason": "actor_unknown"}
+        result = database.decide(
+            issuer=item.actor.issuer, subject=item.actor.subject, email=item.actor.email,
+            request=Request(actor_id, "org_action", str(stable("org_action", item.action)), "invoke"),
+            request_id=item.request_id, preview=item.preview,
+        )
+        return result if result["allowed"] else {"allowed": False, "reason": "not_available"}
+    except Exception:
+        raise HTTPException(503, "Policy decision is unavailable") from None
+
+
+@app.post("/v2/org-action/catalog")
+def org_action_catalog(item: ActorProof, _: None = Depends(require_gateway),
+                       database: PolicyStoreV2 = Depends(store)) -> dict:
+    try:
+        return database.available_org_actions(issuer=item.issuer, subject=item.subject,
+                                              email=item.email)
+    except Exception:
+        raise HTTPException(503, "Action catalog is unavailable") from None
+
+
 @app.post("/v2/context/catalog")
 def context_catalog(item: ActorProof, _: None = Depends(require_gateway),
                     database: PolicyStoreV2 = Depends(store)) -> dict:
@@ -357,6 +425,68 @@ def request_resource_grant(item: ResourceGrantRequest, _: None = Depends(require
         raise HTTPException(403, str(exc)) from None
     except Exception:
         raise HTTPException(503, "Resource grant request is unavailable") from None
+
+
+@app.post("/v2/governance/tools")
+def request_tool_registration(item: ToolRegistrationRequest,
+                              _: None = Depends(require_gateway),
+                              database: PolicyStoreV2 = Depends(store)) -> dict:
+    try:
+        return GovernanceStore(database.dsn).request_tool_registration(
+            issuer=item.actor.issuer, subject=item.actor.subject,
+            email=item.actor.email, provider=item.provider,
+            operations=item.operations,
+            via_seat_id=_reference("seat", item.via_seat_id), reason=item.reason)
+    except ValueError as exc:
+        raise HTTPException(403, str(exc)) from None
+    except Exception:
+        raise HTTPException(503, "Tool registration is unavailable") from None
+
+
+@app.post("/v2/governance/tools/retire")
+def request_tool_retirement(item: ToolRetirementRequest,
+                            _: None = Depends(require_gateway),
+                            database: PolicyStoreV2 = Depends(store)) -> dict:
+    try:
+        return GovernanceStore(database.dsn).request_tool_retirement(
+            issuer=item.actor.issuer, subject=item.actor.subject,
+            email=item.actor.email, provider=item.provider,
+            via_seat_id=_reference("seat", item.via_seat_id), reason=item.reason)
+    except ValueError as exc:
+        raise HTTPException(403, str(exc)) from None
+    except Exception:
+        raise HTTPException(503, "Tool retirement is unavailable") from None
+
+
+@app.post("/v2/governance/resources/retire")
+def request_resource_retirement(item: ResourceRetirementRequest,
+                                _: None = Depends(require_gateway),
+                                database: PolicyStoreV2 = Depends(store)) -> dict:
+    try:
+        return GovernanceStore(database.dsn).request_resource_retirement(
+            issuer=item.actor.issuer, subject=item.actor.subject,
+            email=item.actor.email, resource_id=_reference("resource", item.resource_id),
+            via_seat_id=_reference("seat", item.via_seat_id), reason=item.reason)
+    except ValueError as exc:
+        raise HTTPException(403, str(exc)) from None
+    except Exception:
+        raise HTTPException(503, "Resource retirement is unavailable") from None
+
+
+@app.post("/v2/governance/entities/retire")
+def request_entity_retirement(item: EntityRetirementRequest,
+                              _: None = Depends(require_gateway),
+                              database: PolicyStoreV2 = Depends(store)) -> dict:
+    try:
+        return GovernanceStore(database.dsn).request_entity_retirement(
+            issuer=item.actor.issuer, subject=item.actor.subject,
+            email=item.actor.email, entity_kind=item.entity_kind,
+            entity_code=item.entity_code,
+            via_seat_id=_reference("seat", item.via_seat_id), reason=item.reason)
+    except ValueError as exc:
+        raise HTTPException(403, str(exc)) from None
+    except Exception:
+        raise HTTPException(503, "Entity retirement is unavailable") from None
 
 
 @app.post("/v2/governance/resource-grants/revoke")

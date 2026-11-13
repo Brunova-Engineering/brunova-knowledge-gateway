@@ -11,8 +11,12 @@ from uuid import UUID, uuid4
 
 import psycopg
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 from .publication import _current_request_route
+from .publication import stable
+from .decision import Request, decide_via_seat
+from .store import PolicyStoreV2
 
 
 def _actor(conn, issuer: str, subject: str, email: str):
@@ -72,9 +76,319 @@ def _actor_seat(conn, actor_id: str, seat_id: UUID) -> None:
         raise ValueError("seat_unavailable")
 
 
+def _entity_admin_scope(conn, actor_id: str, seat_id: UUID,
+                        department_id: UUID) -> None:
+    try:
+        _seat(conn, actor_id, seat_id, department_id, ancestor=True)
+    except ValueError:
+        raise ValueError("entity_unavailable") from None
+
+
 class GovernanceStore:
     def __init__(self, dsn: str):
         self.dsn = dsn
+
+    @staticmethod
+    def _can_manage_tool(conn, actor_id: str, via_seat_id: UUID, action: str) -> bool:
+        active = conn.execute(
+            "SELECT release_id FROM panky_policy_releases WHERE status='active'"
+        ).fetchone()
+        if active is None:
+            return False
+        data = PolicyStoreV2("")._snapshot(conn, str(active["release_id"]))
+        result = decide_via_seat(data, Request(actor_id, "org_action",
+                                               str(stable("org_action", action)), "invoke"),
+                                 str(via_seat_id))
+        actor = next((row for row in data["actors"] if row["actor_id"] == actor_id), None)
+        return bool(result.allowed and (
+            actor and actor["super_admin"] or result.seat_id == str(via_seat_id)))
+
+    def request_tool_registration(self, *, issuer: str, subject: str, email: str,
+                                  provider: str, operations: list[str],
+                                  via_seat_id: UUID, reason: str) -> dict:
+        """Queue a tool already known to the Gateway; only Core may publish it."""
+        if (not provider or len(provider) > 64 or not provider.replace("_", "").isalnum()
+                or not operations or len(operations) > 16
+                or len(set(operations)) != len(operations)
+                or any(not op or len(op) > 40 for op in operations)
+                or len(reason.strip()) < 3):
+            raise ValueError("invalid_tool_registration")
+        with psycopg.connect(self.dsn, row_factory=dict_row) as conn, conn.transaction():
+            actor = _actor(conn, issuer, subject, email)
+            _actor_seat(conn, actor["actor_id"], via_seat_id)
+            if not self._can_manage_tool(conn, actor["actor_id"], via_seat_id,
+                                         "tool.register"):
+                raise ValueError("tool_registration_unavailable")
+            if conn.execute(
+                "SELECT 1 FROM panky_tools WHERE code=%s AND status='active'", (provider,)
+            ).fetchone():
+                raise ValueError("tool_already_registered")
+            request_id = uuid4()
+            conn.execute(
+                "INSERT INTO panky_tool_registration_requests "
+                "(request_id,provider,operations_json,requested_by_actor_id,"
+                "requested_via_seat_id,reason) VALUES (%s,%s,%s,%s,%s,%s)",
+                (request_id, provider, Jsonb(operations), actor["actor_id"],
+                 via_seat_id, reason.strip()),
+            )
+            return {"request_id": str(request_id), "status": "approved", "effective": False}
+
+    def request_tool_retirement(self, *, issuer: str, subject: str, email: str,
+                                provider: str, via_seat_id: UUID, reason: str) -> dict:
+        """Queue removal of a Tool with no dependent policy objects."""
+        if (not provider or len(provider) > 64 or not provider.replace("_", "").isalnum()
+                or len(reason.strip()) < 3):
+            raise ValueError("invalid_tool_retirement")
+        with psycopg.connect(self.dsn, row_factory=dict_row) as conn, conn.transaction():
+            actor = _actor(conn, issuer, subject, email)
+            _actor_seat(conn, actor["actor_id"], via_seat_id)
+            if not self._can_manage_tool(conn, actor["actor_id"], via_seat_id,
+                                         "tool.retire"):
+                raise ValueError("tool_retirement_unavailable")
+            tool = conn.execute(
+                "SELECT tool_id FROM panky_tools WHERE code=%s AND status='active'",
+                (provider,),
+            ).fetchone()
+            if tool is None:
+                raise ValueError("tool_unavailable")
+            if conn.execute(
+                "SELECT 1 FROM panky_resources WHERE tool_id=%s AND status='active'",
+                (tool["tool_id"],),
+            ).fetchone() or conn.execute(
+                "SELECT 1 FROM panky_role_operations WHERE tool_id=%s",
+                (tool["tool_id"],),
+            ).fetchone():
+                raise ValueError("tool_has_dependents")
+            request_id = uuid4()
+            conn.execute(
+                "INSERT INTO panky_tool_retirement_requests "
+                "(request_id,provider,requested_by_actor_id,requested_via_seat_id,reason) "
+                "VALUES (%s,%s,%s,%s,%s)",
+                (request_id, provider, actor["actor_id"], via_seat_id, reason.strip()),
+            )
+            return {"request_id": str(request_id), "status": "approved", "effective": False}
+
+    def request_resource_retirement(self, *, issuer: str, subject: str, email: str,
+                                    resource_id: UUID, via_seat_id: UUID,
+                                    reason: str) -> dict:
+        """Retire the policy registration, never the provider's object."""
+        if len(reason.strip()) < 3:
+            raise ValueError("invalid_resource_retirement")
+        with psycopg.connect(self.dsn, row_factory=dict_row) as conn, conn.transaction():
+            actor = _actor(conn, issuer, subject, email)
+            _actor_seat(conn, actor["actor_id"], via_seat_id)
+            resource = conn.execute(
+                "SELECT r.owner_seat_id,d.department_id FROM panky_resources r "
+                "JOIN panky_department_resources d ON d.resource_id=r.resource_id "
+                "AND d.relation='owned' WHERE r.resource_id=%s AND r.status='active'",
+                (resource_id,),
+            ).fetchone()
+            if resource is None:
+                raise ValueError("resource_unavailable")
+            if not actor["super_admin"] and via_seat_id != resource["owner_seat_id"]:
+                _seat(conn, actor["actor_id"], via_seat_id,
+                      resource["department_id"], ancestor=True)
+            if conn.execute(
+                "SELECT 1 FROM panky_resource_share_requests WHERE resource_id=%s "
+                "AND status IN ('pending','approved') AND activated_release_id IS NULL",
+                (resource_id,),
+            ).fetchone() or conn.execute(
+                "SELECT 1 FROM panky_resource_grant_requests WHERE resource_id=%s "
+                "AND activated_release_id IS NULL", (resource_id,),
+            ).fetchone():
+                raise ValueError("resource_has_pending_requests")
+            request_id = uuid4()
+            conn.execute(
+                "INSERT INTO panky_resource_retirement_requests "
+                "(request_id,resource_id,requested_by_actor_id,requested_via_seat_id,reason) "
+                "VALUES (%s,%s,%s,%s,%s)",
+                (request_id, resource_id, actor["actor_id"], via_seat_id,
+                 reason.strip()),
+            )
+            return {"request_id": str(request_id), "status": "approved",
+                    "effective": False}
+
+    def request_entity_retirement(self, *, issuer: str, subject: str, email: str,
+                                  entity_kind: str, entity_code: str,
+                                  via_seat_id: UUID, reason: str) -> dict:
+        """Queue a bounded structural offboarding for protected Core."""
+        if (entity_kind not in {"actor", "seat", "department", "role", "subcontext"}
+                or not entity_code or len(entity_code) > 128
+                or len(reason.strip()) < 3):
+            raise ValueError("invalid_entity_retirement")
+        with psycopg.connect(self.dsn, row_factory=dict_row) as conn, conn.transaction():
+            actor = _actor(conn, issuer, subject, email)
+            _actor_seat(conn, actor["actor_id"], via_seat_id)
+            if not actor["super_admin"]:
+                seat_type = conn.execute(
+                    "SELECT seat_type FROM panky_seats WHERE seat_id=%s",
+                    (via_seat_id,),
+                ).fetchone()["seat_type"]
+                if entity_kind == "role" or seat_type != "admin":
+                    raise ValueError("entity_unavailable")
+            department_ids = []
+            if entity_kind == "actor":
+                target = conn.execute(
+                    "SELECT actor_id,status,super_admin,founder FROM panky_actors "
+                    "WHERE actor_id=%s", (entity_code,),
+                ).fetchone()
+                if (target is None or target["status"] != "active"
+                        or target["super_admin"] or target["founder"]
+                        or target["actor_id"] == actor["actor_id"]):
+                    raise ValueError("entity_unavailable")
+                department_ids = [row["department_id"] for row in conn.execute(
+                    "SELECT DISTINCT s.department_id FROM panky_actor_seats a "
+                    "JOIN panky_seats s ON s.seat_id=a.seat_id "
+                    "WHERE a.actor_id=%s AND s.status='active' AND a.active_from<=now() "
+                    "AND (a.active_until IS NULL OR a.active_until>now())",
+                    (entity_code,),
+                )]
+                if not department_ids and not actor["super_admin"]:
+                    raise ValueError("entity_unavailable")
+                if not actor["super_admin"]:
+                    for department_id in department_ids:
+                        _entity_admin_scope(conn, actor["actor_id"], via_seat_id,
+                                            department_id)
+                if any(conn.execute(query, (entity_code,)).fetchone() for query in (
+                    "SELECT 1 FROM panky_resource_share_requests WHERE requested_by_actor_id=%s "
+                    "AND status IN ('pending','approved') AND activated_release_id IS NULL",
+                    "SELECT 1 FROM panky_resource_grant_requests WHERE requested_by_actor_id=%s "
+                    "AND activated_release_id IS NULL",
+                    "SELECT 1 FROM panky_tool_registration_requests WHERE requested_by_actor_id=%s "
+                    "AND activated_release_id IS NULL",
+                    "SELECT 1 FROM panky_tool_retirement_requests WHERE requested_by_actor_id=%s "
+                    "AND activated_release_id IS NULL",
+                    "SELECT 1 FROM panky_resource_retirement_requests WHERE requested_by_actor_id=%s "
+                    "AND activated_release_id IS NULL",
+                    "SELECT 1 FROM panky_entity_retirement_requests WHERE requested_by_actor_id=%s "
+                    "AND activated_release_id IS NULL",
+                    "SELECT 1 FROM panky_super_admin_changes WHERE target_actor_id=%s "
+                    "AND activated_release_id IS NULL",
+                    "SELECT 1 FROM panky_founder_transfers WHERE to_actor_id=%s "
+                    "AND status IN ('pending','accepted') AND activated_release_id IS NULL",
+                )):
+                    raise ValueError("entity_has_pending_requests")
+            elif entity_kind == "seat":
+                target = conn.execute(
+                    "SELECT seat_id,department_id,context_node_id FROM panky_seats "
+                    "WHERE code=%s AND status='active'", (entity_code,),
+                ).fetchone()
+                if target is None:
+                    raise ValueError("entity_unavailable")
+                department_ids = [target["department_id"]]
+                if not actor["super_admin"]:
+                    _entity_admin_scope(conn, actor["actor_id"], via_seat_id,
+                                        target["department_id"])
+                if conn.execute(
+                    "SELECT 1 FROM panky_actor_seats WHERE seat_id=%s "
+                    "AND active_from<=now() AND (active_until IS NULL OR active_until>now())",
+                    (target["seat_id"],),
+                ).fetchone() or conn.execute(
+                    "SELECT 1 FROM panky_resources WHERE owner_seat_id=%s AND status='active'",
+                    (target["seat_id"],),
+                ).fetchone() or conn.execute(
+                    "SELECT 1 FROM panky_seats WHERE reports_to_seat_id=%s AND status='active'",
+                    (target["seat_id"],),
+                ).fetchone():
+                    raise ValueError("entity_has_dependents")
+                if any(conn.execute(query, (target["seat_id"],)).fetchone() for query in (
+                    "SELECT 1 FROM panky_resource_share_requests WHERE requested_via_seat_id=%s "
+                    "AND status IN ('pending','approved') AND activated_release_id IS NULL",
+                    "SELECT 1 FROM panky_resource_grant_requests WHERE requested_via_seat_id=%s "
+                    "AND activated_release_id IS NULL",
+                    "SELECT 1 FROM panky_tool_registration_requests WHERE requested_via_seat_id=%s "
+                    "AND activated_release_id IS NULL",
+                    "SELECT 1 FROM panky_tool_retirement_requests WHERE requested_via_seat_id=%s "
+                    "AND activated_release_id IS NULL",
+                    "SELECT 1 FROM panky_resource_retirement_requests WHERE requested_via_seat_id=%s "
+                    "AND activated_release_id IS NULL",
+                    "SELECT 1 FROM panky_entity_retirement_requests WHERE requested_via_seat_id=%s "
+                    "AND activated_release_id IS NULL",
+                )):
+                    raise ValueError("entity_has_pending_requests")
+            elif entity_kind == "department":
+                target = conn.execute(
+                    "SELECT department_id,context_node_id,parent_department_id FROM panky_departments "
+                    "WHERE code=%s AND status='active'", (entity_code,),
+                ).fetchone()
+                if target is None or target["parent_department_id"] is None:
+                    raise ValueError("entity_unavailable")
+                department_ids = [target["department_id"]]
+                if not actor["super_admin"]:
+                    _entity_admin_scope(conn, actor["actor_id"], via_seat_id,
+                                        target["department_id"])
+                if conn.execute(
+                    "SELECT 1 FROM panky_departments WHERE parent_department_id=%s "
+                    "AND status='active'", (target["department_id"],),
+                ).fetchone() or conn.execute(
+                    "SELECT 1 FROM panky_seats WHERE department_id=%s AND status='active'",
+                    (target["department_id"],),
+                ).fetchone() or conn.execute(
+                    "SELECT 1 FROM panky_department_resources x JOIN panky_resources r "
+                    "ON r.resource_id=x.resource_id WHERE x.department_id=%s "
+                    "AND r.status='active'", (target["department_id"],),
+                ).fetchone():
+                    raise ValueError("entity_has_dependents")
+                if conn.execute(
+                    "SELECT 1 FROM panky_resource_share_requests WHERE "
+                    "(source_department_id=%s OR target_department_id=%s) "
+                    "AND status IN ('pending','approved') AND activated_release_id IS NULL",
+                    (target["department_id"], target["department_id"]),
+                ).fetchone() or conn.execute(
+                    "SELECT 1 FROM panky_context_nodes WHERE parent_node_id=%s "
+                    "AND lifecycle='active'", (target["context_node_id"],),
+                ).fetchone():
+                    raise ValueError("entity_has_dependents")
+            elif entity_kind == "role":
+                target = conn.execute(
+                    "SELECT role_id FROM panky_roles WHERE code=%s AND status='active'",
+                    (entity_code,),
+                ).fetchone()
+                if target is None:
+                    raise ValueError("entity_unavailable")
+                if conn.execute(
+                    "SELECT 1 FROM panky_seats WHERE role_id=%s AND status='active'",
+                    (target["role_id"],),
+                ).fetchone():
+                    raise ValueError("entity_has_dependents")
+                if not actor["super_admin"]:
+                    raise ValueError("entity_unavailable")
+            else:
+                target = conn.execute(
+                    "SELECT node_id FROM panky_context_nodes WHERE node_id=%s "
+                    "AND kind='subcontext' AND lifecycle='active'", (entity_code,),
+                ).fetchone()
+                if target is None:
+                    raise ValueError("entity_unavailable")
+                department_ids = [row["department_id"] for row in conn.execute(
+                    "WITH RECURSIVE lineage AS ("
+                    "SELECT node_id,parent_node_id,0 AS depth FROM panky_context_nodes WHERE node_id=%s "
+                    "UNION ALL SELECT n.node_id,n.parent_node_id,l.depth+1 FROM panky_context_nodes n "
+                    "JOIN lineage l ON n.node_id=l.parent_node_id) "
+                    "SELECT d.department_id FROM lineage l JOIN panky_departments d "
+                    "ON d.context_node_id=l.node_id WHERE d.status='active' "
+                    "ORDER BY l.depth LIMIT 1", (entity_code,),
+                )]
+                if not department_ids:
+                    raise ValueError("entity_unavailable")
+                if not actor["super_admin"]:
+                    _entity_admin_scope(conn, actor["actor_id"], via_seat_id,
+                                        department_ids[0])
+                if conn.execute(
+                    "SELECT 1 FROM panky_context_nodes WHERE parent_node_id=%s "
+                    "AND lifecycle='active'", (entity_code,),
+                ).fetchone():
+                    raise ValueError("entity_has_dependents")
+            request_id = uuid4()
+            conn.execute(
+                "INSERT INTO panky_entity_retirement_requests "
+                "(request_id,entity_kind,entity_code,requested_by_actor_id,"
+                "requested_via_seat_id,reason) VALUES (%s,%s,%s,%s,%s,%s)",
+                (request_id, entity_kind, entity_code, actor["actor_id"],
+                 via_seat_id, reason.strip()),
+            )
+            return {"request_id": str(request_id), "status": "approved",
+                    "effective": False}
 
     def resource_sharing(self, *, issuer: str, subject: str, email: str,
                          resource_id: UUID, via_seat_id: UUID) -> dict:
@@ -183,6 +497,24 @@ class GovernanceStore:
     def approved_for_core(self) -> dict:
         """Return only approved, unused changes to the verified Core workflow."""
         with psycopg.connect(self.dsn, row_factory=dict_row) as conn:
+            for row in conn.execute(
+                "SELECT requested_by_actor_id,requested_via_seat_id "
+                "FROM panky_tool_registration_requests WHERE activated_release_id IS NULL"
+            ):
+                if not self._can_manage_tool(
+                    conn, row["requested_by_actor_id"], row["requested_via_seat_id"],
+                    "tool.register"
+                ):
+                    raise ValueError("Tool registration approval is stale")
+            for row in conn.execute(
+                "SELECT requested_by_actor_id,requested_via_seat_id "
+                "FROM panky_tool_retirement_requests WHERE activated_release_id IS NULL"
+            ):
+                if not self._can_manage_tool(
+                    conn, row["requested_by_actor_id"], row["requested_via_seat_id"],
+                    "tool.retire"
+                ):
+                    raise ValueError("Tool retirement approval is stale")
             # A request can lose its authority after approval. Reject the batch
             # before Core changes its head, rather than waiting for publication
             # to discover a stale approval after the commit has been pushed.
@@ -266,8 +598,43 @@ class GovernanceStore:
             ]
             if any(item.get("resource") is None for item in [*shares, *grants]):
                 raise ValueError("Approved request lacks a Core resource code")
+            tools = [
+                {"request_id": str(row["request_id"]), "provider": row["provider"],
+                 "operations": row["operations_json"]}
+                for row in conn.execute(
+                    "SELECT request_id,provider,operations_json FROM panky_tool_registration_requests "
+                    "WHERE activated_release_id IS NULL ORDER BY requested_at"
+                )
+            ]
+            tools_retire = [
+                {"request_id": str(row["request_id"]), "provider": row["provider"]}
+                for row in conn.execute(
+                    "SELECT request_id,provider FROM panky_tool_retirement_requests "
+                    "WHERE activated_release_id IS NULL ORDER BY requested_at"
+                )
+            ]
+            resources_retire = [
+                {"request_id": str(row["request_id"]), "resource": row["code"]}
+                for row in conn.execute(
+                    "SELECT q.request_id,r.code FROM panky_resource_retirement_requests q "
+                    "JOIN panky_resources r ON r.resource_id=q.resource_id "
+                    "WHERE q.activated_release_id IS NULL ORDER BY q.requested_at"
+                )
+            ]
+            entities_retire = [
+                {"request_id": str(row["request_id"]), "kind": row["entity_kind"],
+                 "code": row["entity_code"]}
+                for row in conn.execute(
+                    "SELECT request_id,entity_kind,entity_code "
+                    "FROM panky_entity_retirement_requests "
+                    "WHERE activated_release_id IS NULL ORDER BY requested_at"
+                )
+            ]
             return {"shares": shares, "resource_grants": grants,
-                    "super_admin_changes": admins, "founder_transfers": transfers}
+                    "super_admin_changes": admins, "founder_transfers": transfers,
+                    "tools": tools, "tools_retire": tools_retire,
+                    "resources_retire": resources_retire,
+                    "entities_retire": entities_retire}
 
     def request_share(self, *, issuer: str, subject: str, email: str,
                       resource_id: UUID, target_department_id: UUID,
@@ -289,7 +656,7 @@ class GovernanceStore:
             if resource["department_id"] == target_department_id:
                 raise ValueError("same_department")
             if not conn.execute(
-                "SELECT 1 FROM panky_departments WHERE department_id=%s",
+                "SELECT 1 FROM panky_departments WHERE department_id=%s AND status='active'",
                 (target_department_id,),
             ).fetchone():
                 raise ValueError("target_unknown")
