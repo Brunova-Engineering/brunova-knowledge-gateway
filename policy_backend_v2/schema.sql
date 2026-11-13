@@ -43,6 +43,7 @@ CREATE TABLE panky_departments (
   name text NOT NULL,
   parent_department_id uuid REFERENCES panky_departments(department_id),
   context_node_id text NOT NULL UNIQUE REFERENCES panky_context_nodes(node_id),
+  status text NOT NULL DEFAULT 'active' CHECK (status IN ('active','disabled')),
   CHECK (department_id <> parent_department_id)
 );
 
@@ -210,6 +211,57 @@ CREATE TABLE panky_org_actions (
   delegable boolean NOT NULL,
   governed_only boolean NOT NULL
 );
+
+CREATE TABLE panky_tool_registration_requests (
+  request_id uuid PRIMARY KEY,
+  provider text NOT NULL,
+  operations_json jsonb NOT NULL CHECK (jsonb_typeof(operations_json)='array'),
+  requested_by_actor_id text NOT NULL REFERENCES panky_actors(actor_id),
+  requested_via_seat_id uuid NOT NULL REFERENCES panky_seats(seat_id),
+  reason text NOT NULL,
+  requested_at timestamptz NOT NULL DEFAULT now(),
+  activated_release_id uuid REFERENCES panky_policy_releases(release_id)
+);
+CREATE UNIQUE INDEX panky_one_open_tool_registration
+  ON panky_tool_registration_requests(provider) WHERE activated_release_id IS NULL;
+
+CREATE TABLE panky_tool_retirement_requests (
+  request_id uuid PRIMARY KEY,
+  provider text NOT NULL,
+  requested_by_actor_id text NOT NULL REFERENCES panky_actors(actor_id),
+  requested_via_seat_id uuid NOT NULL REFERENCES panky_seats(seat_id),
+  reason text NOT NULL,
+  requested_at timestamptz NOT NULL DEFAULT now(),
+  activated_release_id uuid REFERENCES panky_policy_releases(release_id)
+);
+CREATE UNIQUE INDEX panky_one_open_tool_retirement
+  ON panky_tool_retirement_requests(provider) WHERE activated_release_id IS NULL;
+
+CREATE TABLE panky_resource_retirement_requests (
+  request_id uuid PRIMARY KEY,
+  resource_id uuid NOT NULL REFERENCES panky_resources(resource_id),
+  requested_by_actor_id text NOT NULL REFERENCES panky_actors(actor_id),
+  requested_via_seat_id uuid NOT NULL REFERENCES panky_seats(seat_id),
+  reason text NOT NULL,
+  requested_at timestamptz NOT NULL DEFAULT now(),
+  activated_release_id uuid REFERENCES panky_policy_releases(release_id)
+);
+CREATE UNIQUE INDEX panky_one_open_resource_retirement
+  ON panky_resource_retirement_requests(resource_id) WHERE activated_release_id IS NULL;
+
+CREATE TABLE panky_entity_retirement_requests (
+  request_id uuid PRIMARY KEY,
+  entity_kind text NOT NULL CHECK (entity_kind IN ('actor','seat','department','role','subcontext')),
+  entity_code text NOT NULL,
+  requested_by_actor_id text NOT NULL REFERENCES panky_actors(actor_id),
+  requested_via_seat_id uuid NOT NULL REFERENCES panky_seats(seat_id),
+  reason text NOT NULL,
+  requested_at timestamptz NOT NULL DEFAULT now(),
+  activated_release_id uuid REFERENCES panky_policy_releases(release_id)
+);
+CREATE UNIQUE INDEX panky_one_open_entity_retirement
+  ON panky_entity_retirement_requests(entity_kind,entity_code)
+  WHERE activated_release_id IS NULL;
 
 CREATE TABLE panky_grants (
   grant_id uuid PRIMARY KEY,

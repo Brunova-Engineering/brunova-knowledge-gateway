@@ -116,6 +116,36 @@ class ResourceGrantRequest(BaseModel):
     reason: str = Field(min_length=3, max_length=1000)
 
 
+class ToolRegistrationRequest(BaseModel):
+    actor: ActorProof
+    provider: str = Field(min_length=1, max_length=64)
+    operations: list[str] = Field(min_length=1, max_length=16)
+    via_seat_id: str
+    reason: str = Field(min_length=3, max_length=1000)
+
+
+class ToolRetirementRequest(BaseModel):
+    actor: ActorProof
+    provider: str = Field(min_length=1, max_length=64)
+    via_seat_id: str
+    reason: str = Field(min_length=3, max_length=1000)
+
+
+class ResourceRetirementRequest(BaseModel):
+    actor: ActorProof
+    resource_id: str
+    via_seat_id: str
+    reason: str = Field(min_length=3, max_length=1000)
+
+
+class EntityRetirementRequest(BaseModel):
+    actor: ActorProof
+    entity_kind: str
+    entity_code: str
+    via_seat_id: str
+    reason: str = Field(min_length=3, max_length=1000)
+
+
 class ResourceSharingQuery(BaseModel):
     actor: ActorProof
     resource_id: str
@@ -395,6 +425,68 @@ def request_resource_grant(item: ResourceGrantRequest, _: None = Depends(require
         raise HTTPException(403, str(exc)) from None
     except Exception:
         raise HTTPException(503, "Resource grant request is unavailable") from None
+
+
+@app.post("/v2/governance/tools")
+def request_tool_registration(item: ToolRegistrationRequest,
+                              _: None = Depends(require_gateway),
+                              database: PolicyStoreV2 = Depends(store)) -> dict:
+    try:
+        return GovernanceStore(database.dsn).request_tool_registration(
+            issuer=item.actor.issuer, subject=item.actor.subject,
+            email=item.actor.email, provider=item.provider,
+            operations=item.operations,
+            via_seat_id=_reference("seat", item.via_seat_id), reason=item.reason)
+    except ValueError as exc:
+        raise HTTPException(403, str(exc)) from None
+    except Exception:
+        raise HTTPException(503, "Tool registration is unavailable") from None
+
+
+@app.post("/v2/governance/tools/retire")
+def request_tool_retirement(item: ToolRetirementRequest,
+                            _: None = Depends(require_gateway),
+                            database: PolicyStoreV2 = Depends(store)) -> dict:
+    try:
+        return GovernanceStore(database.dsn).request_tool_retirement(
+            issuer=item.actor.issuer, subject=item.actor.subject,
+            email=item.actor.email, provider=item.provider,
+            via_seat_id=_reference("seat", item.via_seat_id), reason=item.reason)
+    except ValueError as exc:
+        raise HTTPException(403, str(exc)) from None
+    except Exception:
+        raise HTTPException(503, "Tool retirement is unavailable") from None
+
+
+@app.post("/v2/governance/resources/retire")
+def request_resource_retirement(item: ResourceRetirementRequest,
+                                _: None = Depends(require_gateway),
+                                database: PolicyStoreV2 = Depends(store)) -> dict:
+    try:
+        return GovernanceStore(database.dsn).request_resource_retirement(
+            issuer=item.actor.issuer, subject=item.actor.subject,
+            email=item.actor.email, resource_id=_reference("resource", item.resource_id),
+            via_seat_id=_reference("seat", item.via_seat_id), reason=item.reason)
+    except ValueError as exc:
+        raise HTTPException(403, str(exc)) from None
+    except Exception:
+        raise HTTPException(503, "Resource retirement is unavailable") from None
+
+
+@app.post("/v2/governance/entities/retire")
+def request_entity_retirement(item: EntityRetirementRequest,
+                              _: None = Depends(require_gateway),
+                              database: PolicyStoreV2 = Depends(store)) -> dict:
+    try:
+        return GovernanceStore(database.dsn).request_entity_retirement(
+            issuer=item.actor.issuer, subject=item.actor.subject,
+            email=item.actor.email, entity_kind=item.entity_kind,
+            entity_code=item.entity_code,
+            via_seat_id=_reference("seat", item.via_seat_id), reason=item.reason)
+    except ValueError as exc:
+        raise HTTPException(403, str(exc)) from None
+    except Exception:
+        raise HTTPException(503, "Entity retirement is unavailable") from None
 
 
 @app.post("/v2/governance/resource-grants/revoke")

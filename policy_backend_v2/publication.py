@@ -6,10 +6,13 @@ from datetime import datetime, timezone
 from uuid import UUID, uuid4, uuid5
 
 import psycopg
+from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from .models import Policy
 from .org_actions import CATALOG
+from .decision import Request, decide_via_seat
+from .store import PolicyStoreV2
 
 
 NAMESPACE = UUID("8de4d0f8-35db-4ae0-bff9-b311e941b5ae")
@@ -148,6 +151,195 @@ def activate(dsn: str, policy: Policy, registry: dict, topology: dict,
         accepted_transfer = None
         approved_admin_changes = []
         approved_resource_grants = []
+        approved_tool_registrations = []
+        approved_tool_retirements = []
+        approved_resource_retirements = []
+        approved_entity_retirements = []
+        if active is not None:
+            with conn.cursor(row_factory=dict_row) as cursor:
+                previous = PolicyStoreV2("")._snapshot(cursor, str(active[0]))
+            new_tools = {tool.code: tool for tool in policy.tools}
+            for row in conn.execute(
+                "SELECT request_id,provider,operations_json,requested_by_actor_id,"
+                "requested_via_seat_id FROM panky_tool_registration_requests "
+                "WHERE activated_release_id IS NULL FOR UPDATE"
+            ):
+                target = new_tools.get(row[1])
+                result = decide_via_seat(previous, Request(
+                    row[3], "org_action",
+                    str(stable("org_action", "tool.register")), "invoke"
+                ), str(row[4]))
+                actor = next((item for item in previous["actors"]
+                              if item["actor_id"] == row[3]), None)
+                route_ok = bool(result.allowed and (
+                    result.seat_id == str(row[4])
+                    or (actor and actor["super_admin"] and conn.execute(
+                        "SELECT 1 FROM panky_actor_seats a JOIN panky_seats s "
+                        "ON s.seat_id=a.seat_id WHERE a.actor_id=%s AND a.seat_id=%s "
+                        "AND s.status='active' AND a.active_from<=now() "
+                        "AND (a.active_until IS NULL OR a.active_until>now())",
+                        (row[3], row[4]),
+                    ).fetchone())
+                ))
+                if (not route_ok or target is None or target.provider != row[1]
+                        or target.operations != row[2]):
+                    raise ValueError("Tool registration approval is stale or differs from Core")
+                approved_tool_registrations.append(row[0])
+            previous_tools = {row["code"]: row for row in previous["tools"]}
+            new_resources = {resource.code for resource in policy.resources}
+            for row in conn.execute(
+                "SELECT request_id,provider,requested_by_actor_id,requested_via_seat_id "
+                "FROM panky_tool_retirement_requests WHERE activated_release_id IS NULL FOR UPDATE"
+            ):
+                old_tool = previous_tools.get(row[1])
+                result = decide_via_seat(previous, Request(
+                    row[2], "org_action", str(stable("org_action", "tool.retire")),
+                    "invoke"), str(row[3]))
+                actor = next((item for item in previous["actors"]
+                              if item["actor_id"] == row[2]), None)
+                route_ok = bool(result.allowed and (
+                    result.seat_id == str(row[3]) or
+                    (actor and actor["super_admin"] and conn.execute(
+                        "SELECT 1 FROM panky_actor_seats a JOIN panky_seats s "
+                        "ON s.seat_id=a.seat_id WHERE a.actor_id=%s AND a.seat_id=%s "
+                        "AND s.status='active' AND a.active_from<=now() "
+                        "AND (a.active_until IS NULL OR a.active_until>now())",
+                        (row[2], row[3]),
+                    ).fetchone())
+                ))
+                if (not route_ok or old_tool is None or row[1] in new_tools
+                        or any(resource["tool_id"] == old_tool["tool_id"]
+                               and resource["code"] in new_resources
+                               for resource in previous["resources"])
+                        or any(operation["tool_id"] == old_tool["tool_id"]
+                               for operation in previous["role_operations"])):
+                    raise ValueError("Tool retirement approval is stale or has dependents")
+                approved_tool_retirements.append(row[0])
+            for row in conn.execute(
+                "SELECT q.request_id,q.resource_id,q.requested_by_actor_id,"
+                "q.requested_via_seat_id,r.code,r.owner_seat_id,d.department_id "
+                "FROM panky_resource_retirement_requests q "
+                "JOIN panky_resources r ON r.resource_id=q.resource_id "
+                "JOIN panky_department_resources d ON d.resource_id=r.resource_id "
+                "AND d.relation='owned' "
+                "WHERE q.activated_release_id IS NULL FOR UPDATE OF q"
+            ):
+                seat_route = conn.execute(
+                    "SELECT 1 FROM panky_actor_seats a JOIN panky_seats s "
+                    "ON s.seat_id=a.seat_id WHERE a.actor_id=%s AND a.seat_id=%s "
+                    "AND s.status='active' AND a.active_from<=now() "
+                    "AND (a.active_until IS NULL OR a.active_until>now())",
+                    (row[2], row[3]),
+                ).fetchone()
+                owner_route = row[3] == row[5]
+                if (not seat_route or row[4] in new_resources
+                        or not _current_request_route(
+                            conn, row[2], row[3], row[6], admin=not owner_route)
+                        or conn.execute(
+                            "SELECT 1 FROM panky_resource_share_requests WHERE resource_id=%s "
+                            "AND status IN ('pending','approved') AND activated_release_id IS NULL",
+                            (row[1],),
+                        ).fetchone()
+                        or conn.execute(
+                            "SELECT 1 FROM panky_resource_grant_requests WHERE resource_id=%s "
+                            "AND activated_release_id IS NULL", (row[1],),
+                        ).fetchone()
+                        or any(grant.target_kind == "external_resource"
+                               and grant.target == row[4] for grant in policy.grants)):
+                    raise ValueError("Resource retirement approval is stale")
+                approved_resource_retirements.append(row[0])
+            current_actors = {item.actor_id for item in policy.actors}
+            current_seats = {item.code for item in policy.seats}
+            current_departments = {item.code for item in policy.departments}
+            current_roles = {item.code for item in policy.roles}
+            current_nodes = {item.node_id: item for item in policy.context_nodes}
+            for row in conn.execute(
+                "SELECT request_id,entity_kind,entity_code,requested_by_actor_id,"
+                "requested_via_seat_id FROM panky_entity_retirement_requests "
+                "WHERE activated_release_id IS NULL FOR UPDATE"
+            ):
+                kind, code = row[1], row[2]
+                seat_route = conn.execute(
+                    "SELECT 1 FROM panky_actor_seats a JOIN panky_seats s "
+                    "ON s.seat_id=a.seat_id WHERE a.actor_id=%s AND a.seat_id=%s "
+                    "AND s.status='active' AND a.active_from<=now() "
+                    "AND (a.active_until IS NULL OR a.active_until>now())",
+                    (row[3], row[4]),
+                ).fetchone()
+                if not seat_route:
+                    raise ValueError("Entity retirement approval lost its Seat")
+                if kind == "actor":
+                    old = conn.execute(
+                        "SELECT status,super_admin,founder FROM panky_actors WHERE actor_id=%s",
+                        (code,),
+                    ).fetchone()
+                    departments_for_target = [item[0] for item in conn.execute(
+                        "SELECT DISTINCT s.department_id FROM panky_actor_seats a "
+                        "JOIN panky_seats s ON s.seat_id=a.seat_id "
+                        "WHERE a.actor_id=%s AND s.status='active' "
+                        "AND a.active_from<=now() "
+                        "AND (a.active_until IS NULL OR a.active_until>now())",
+                        (code,),
+                    )]
+                    removed = code not in current_actors
+                    valid = bool(old and old[0] == "active" and not old[1]
+                                 and not old[2] and code != row[3] and removed)
+                elif kind == "seat":
+                    old = conn.execute(
+                        "SELECT department_id FROM panky_seats WHERE code=%s AND status='active'",
+                        (code,),
+                    ).fetchone()
+                    departments_for_target = [old[0]] if old else []
+                    valid = bool(old and code not in current_seats)
+                elif kind == "department":
+                    old = conn.execute(
+                        "SELECT department_id FROM panky_departments WHERE code=%s AND status='active'",
+                        (code,),
+                    ).fetchone()
+                    departments_for_target = [old[0]] if old else []
+                    valid = bool(old and code not in current_departments)
+                elif kind == "role":
+                    old = conn.execute(
+                        "SELECT 1 FROM panky_roles WHERE code=%s AND status='active'",
+                        (code,),
+                    ).fetchone()
+                    departments_for_target = []
+                    super_admin = conn.execute(
+                        "SELECT 1 FROM panky_actors WHERE actor_id=%s "
+                        "AND status='active' AND super_admin", (row[3],),
+                    ).fetchone()
+                    valid = bool(old and code not in current_roles and super_admin)
+                elif kind == "subcontext":
+                    old = conn.execute(
+                        "SELECT 1 FROM panky_context_nodes WHERE node_id=%s "
+                        "AND kind='subcontext' AND lifecycle='active'", (code,),
+                    ).fetchone()
+                    departments_for_target = [item[0] for item in conn.execute(
+                        "WITH RECURSIVE lineage AS ("
+                        "SELECT node_id,parent_node_id,0 AS depth FROM panky_context_nodes WHERE node_id=%s "
+                        "UNION ALL SELECT n.node_id,n.parent_node_id,l.depth+1 "
+                        "FROM panky_context_nodes n JOIN lineage l "
+                        "ON n.node_id=l.parent_node_id) "
+                        "SELECT d.department_id FROM lineage l JOIN panky_departments d "
+                        "ON d.context_node_id=l.node_id AND d.status='active' "
+                        "ORDER BY l.depth LIMIT 1", (code,),
+                    )]
+                    valid = bool(old and code in current_nodes
+                                 and current_nodes[code].lifecycle == "archived")
+                else:
+                    valid = False
+                    departments_for_target = []
+                if (not valid or (kind != "role" and not departments_for_target
+                                  and not conn.execute(
+                                      "SELECT 1 FROM panky_actors WHERE actor_id=%s "
+                                      "AND status='active' AND super_admin",
+                                      (row[3],),
+                                  ).fetchone())
+                        or any(not _current_request_route(
+                            conn, row[3], row[4], department_id, admin=True)
+                               for department_id in departments_for_target)):
+                    raise ValueError("Entity retirement approval is stale")
+                approved_entity_retirements.append(row[0])
         if policy.schema_version == 3 and active is not None:
             old_admins = {row[0]: row[1] for row in conn.execute(
                 "SELECT actor_id,super_admin FROM panky_actors WHERE status='active'"
@@ -339,11 +531,13 @@ def activate(dsn: str, policy: Policy, registry: dict, topology: dict,
                          (node.parent_node_id, node.node_id))
         for d in policy.departments:
             conn.execute(
-                "INSERT INTO panky_departments(department_id,code,name,context_node_id) "
-                "VALUES (%s,%s,%s,%s) ON CONFLICT(department_id) DO UPDATE SET "
-                "name=EXCLUDED.name,context_node_id=EXCLUDED.context_node_id",
+                "INSERT INTO panky_departments(department_id,code,name,context_node_id,status) "
+                "VALUES (%s,%s,%s,%s,'active') ON CONFLICT(department_id) DO UPDATE SET "
+                "name=EXCLUDED.name,context_node_id=EXCLUDED.context_node_id,status='active'",
                 (stable("department", d.code), d.code, d.name, d.context_node_id),
             )
+        conn.execute("UPDATE panky_departments SET status='disabled' "
+                     "WHERE NOT(department_id=ANY(%s))", (department_ids,))
         for d in policy.departments:
             conn.execute("UPDATE panky_departments SET parent_department_id=%s WHERE department_id=%s",
                          (stable("department", d.parent) if d.parent else None,
@@ -454,6 +648,30 @@ def activate(dsn: str, policy: Policy, registry: dict, topology: dict,
                 "UPDATE panky_resource_grant_requests SET activated_release_id=%s "
                 "WHERE request_id=ANY(%s)",
                 (release_id, approved_resource_grants),
+            )
+        if approved_tool_registrations:
+            conn.execute(
+                "UPDATE panky_tool_registration_requests SET activated_release_id=%s "
+                "WHERE request_id=ANY(%s)",
+                (release_id, approved_tool_registrations),
+            )
+        if approved_tool_retirements:
+            conn.execute(
+                "UPDATE panky_tool_retirement_requests SET activated_release_id=%s "
+                "WHERE request_id=ANY(%s)",
+                (release_id, approved_tool_retirements),
+            )
+        if approved_resource_retirements:
+            conn.execute(
+                "UPDATE panky_resource_retirement_requests SET activated_release_id=%s "
+                "WHERE request_id=ANY(%s)",
+                (release_id, approved_resource_retirements),
+            )
+        if approved_entity_retirements:
+            conn.execute(
+                "UPDATE panky_entity_retirement_requests SET activated_release_id=%s "
+                "WHERE request_id=ANY(%s)",
+                (release_id, approved_entity_retirements),
             )
         for action in CATALOG.values():
             conn.execute(

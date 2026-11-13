@@ -193,7 +193,7 @@ def decide(data: dict[str, list[dict]], request: Request, now: datetime | None =
     if request.target_kind == "org_action":
         target = _lookup(data.get("org_actions", []), "action_id").get(request.target_id)
         if (not target or target.get("code") not in CATALOG
-                or target.get("code") != "tool.register"
+                or target.get("code") not in {"tool.register", "tool.retire"}
                 or not target.get("delegable") or target.get("governed_only")
                 or request.operation != "invoke" or request.surface is not None):
             return Decision(False, "target_unavailable")
@@ -260,3 +260,13 @@ def decide(data: dict[str, list[dict]], request: Request, now: datetime | None =
             return Decision(True, "grant" if selected else "base", str(seat["seat_id"]),
                             str(selected["grant_id"]) if selected else None)
     return Decision(False, "no_authorized_seat")
+
+
+def decide_via_seat(data: dict[str, list[dict]], request: Request,
+                    seat_id: str, now: datetime | None = None) -> Decision:
+    """Evaluate one complete Seat route; never borrow authority from another."""
+    scoped = dict(data)
+    scoped["actor_seats"] = [row for row in data["actor_seats"]
+                             if str(row["actor_id"]) == request.actor_id
+                             and str(row["seat_id"]) == seat_id]
+    return decide(scoped, request, now)

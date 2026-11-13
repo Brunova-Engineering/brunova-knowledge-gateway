@@ -15,6 +15,7 @@ INSERT INTO panky_org_actions(action_id,code,default_authority,scope_kind,delega
   ('4036ffde-3d57-5f06-9a34-e3e1403f8d27','share_cross_department.decide','admin','receiving_branch',false,true),
   ('6f049322-44c6-5079-83be-cc159316be55','role.manage','super_admin','organization',false,true),
   ('d3bbf4b6-000d-5483-8b4c-13dab1c33030','tool.register','super_admin','organization',true,false),
+  ('07dd3dd0-1409-59fd-9c99-6e58dfeb90f3','tool.retire','super_admin','organization',true,false),
   ('9f9e0bd2-3510-59a4-b186-ff8634b8e083','tool.connector_configure','super_admin','provider',false,true),
   ('01a93ae0-e29f-5167-ac9a-96c0f0b318ce','super_admin.appoint','super_admin','organization',false,true),
   ('15b25657-b56b-5c6a-ba1f-74ab94cdf474','super_admin.revoke','founder','organization',false,true),

@@ -489,6 +489,85 @@ def test_org_action_catalog_exposes_only_verified_actor_actions(
     assert len(calls) == 1 and calls[0].subject == "google-subject"
 
 
+def test_developer_tool_registration_uses_gateway_connector_not_user_operations(
+    monkeypatch, ephemeral_gateway_token,
+):
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    monkeypatch.setenv("PANKY_POLICY_MODE", "shadow")
+    monkeypatch.setenv("PANKY_GATEWAY_SIGNING_KEY", "x" * 40)
+    monkeypatch.setenv("PANKY_DESKTOP_OAUTH_CLIENT_ID", "fixture-client")
+    monkeypatch.setattr("app.auth.panky_bridge.id_token.verify_oauth2_token",
+                        lambda proof, request, audience: {
+                            "iss": "https://accounts.google.com", "aud": audience,
+                            "sub": "google-subject", "email": "dev@example.invalid",
+                            "email_verified": True,
+                        })
+    monkeypatch.setattr("app.main.org_action_decision", lambda identity, action: True)
+
+    async def connected(provider):
+        return ["call"] if provider == "hubspot" else []
+
+    monkeypatch.setattr("app.main._connected_provider_operations", connected)
+    seen = []
+
+    def register(identity, action, data):
+        seen.append((identity, action, data))
+        return {"request_id": "fixture", "status": "approved", "effective": False}
+
+    monkeypatch.setattr("app.main.governance_action", register)
+    bearer, _ = issue_access_token("verified-fixture-proof")
+    client = TestClient(app)
+    body = {"action": "tool_register", "data": {"provider": "HubSpot",
+            "via_seat_id": "dev_01", "reason": "Use customer tools",
+            "operations": ["delete"]}}
+    legacy = client.post("/panky/governance/action", json=body,
+                         headers={"Authorization": f"Bearer {ephemeral_gateway_token}"})
+    allowed = client.post("/panky/governance/action", json=body,
+                          headers={"Authorization": f"Bearer {bearer}"})
+    assert legacy.status_code == 403
+    assert allowed.status_code == 200 and allowed.json()["effective"] is False
+    assert seen[0][1:] == ("tool_register", {"provider": "hubspot", "operations": ["call"],
+                                           "via_seat_id": "dev_01", "reason": "Use customer tools"})
+    body["data"]["provider"] = "unknown"
+    unavailable = client.post("/panky/governance/action", json=body,
+                              headers={"Authorization": f"Bearer {bearer}"})
+    assert unavailable.json() == {"status": "denied", "reason": "connector_unavailable"}
+    retired = client.post(
+        "/panky/governance/action",
+        json={"action": "tool_retire", "data": {"provider": "Acquisition",
+              "via_seat_id": "dev_01", "reason": "No longer use prospecting"}},
+        headers={"Authorization": f"Bearer {bearer}"},
+    )
+    assert retired.status_code == 200
+    assert seen[-1][1:] == (
+        "tool_retire", {"provider": "acquisition", "via_seat_id": "dev_01",
+                        "reason": "No longer use prospecting"})
+    resource = client.post(
+        "/panky/governance/action",
+        json={"action": "resource_retire", "data": {
+            "resource_id": "hq_drive", "via_seat_id": "dev_01",
+            "reason": "No longer catalog the drive"}},
+        headers={"Authorization": f"Bearer {bearer}"},
+    )
+    assert resource.status_code == 200
+    assert seen[-1][1:] == (
+        "resource_retire", {"resource_id": "hq_drive", "via_seat_id": "dev_01",
+                            "reason": "No longer catalog the drive"})
+    entity = client.post(
+        "/panky/governance/action",
+        json={"action": "entity_retire", "data": {
+            "entity_kind": "department", "entity_code": "old_area",
+            "via_seat_id": "management_01", "reason": "Close the old area"}},
+        headers={"Authorization": f"Bearer {bearer}"},
+    )
+    assert entity.status_code == 200
+    assert seen[-1][1:] == (
+        "entity_retire", {"entity_kind": "department", "entity_code": "old_area",
+                          "via_seat_id": "management_01", "reason": "Close the old area"})
+
+
 def test_gateway_context_decision_rejects_legacy_and_uses_verified_actor(
     monkeypatch, ephemeral_gateway_token,
 ):

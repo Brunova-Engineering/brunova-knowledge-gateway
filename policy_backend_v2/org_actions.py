@@ -25,6 +25,7 @@ CATALOG = {action.code: action for action in (
     OrgAction("share_cross_department.decide", "admin", "receiving_branch", governed_only=True),
     OrgAction("role.manage", "super_admin", "organization", governed_only=True),
     OrgAction("tool.register", "super_admin", "organization", delegable=True),
+    OrgAction("tool.retire", "super_admin", "organization", delegable=True),
     OrgAction("tool.connector_configure", "super_admin", "provider", governed_only=True),
     OrgAction("super_admin.appoint", "super_admin", "organization", governed_only=True),
     OrgAction("super_admin.revoke", "founder", "organization", governed_only=True),

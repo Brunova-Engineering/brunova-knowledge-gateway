@@ -27,6 +27,9 @@ from app.adapters.google_workspace.sheets import GoogleSheetsAdapter
 from app.adapters.hubspot.mcp_client import account_metadata_from_result
 from app.adapters.hubspot.models import HubSpotConnectionStatus
 from app.adapters.hubspot.runtime import HubSpotRuntime, get_hubspot_runtime
+from app.adapters.n8n.runtime import get_n8n_client
+from app.adapters.openwa.runtime import get_openwa_client
+from mcp.server import MCPServer
 from app.config.settings import Settings, get_settings
 from app.knowledge import (
     discover_candidate_sources,
@@ -36,7 +39,8 @@ from app.knowledge import (
     retrieve_authorized_document,
     retrieve_authorized_sheet_range_by_id,
 )
-from app.mcp_server import mcp_http_app, mcp_server
+from app.mcp_server import (mcp_http_app, mcp_server, _tool_provider,
+                            _panky_operation, TOOL_CAPABILITIES)
 from app.middleware.authentication import GatewayAuthenticationMiddleware
 from app.policies.workspace import ContentReadPolicy, DriveReadPolicy
 from app.policies.source_access import SourceAccessPolicy
@@ -49,7 +53,7 @@ from app.source_registry import SourceRegistry, SourceRegistryMetadata
 from app.auth.pubsub_push import parse_pubsub_signal, verify_pubsub_oidc
 from app.agent_signals import AgentSignalInbox
 from app.runtime import get_runtime_gateway
-from app.auth.panky_bridge import PankyBridgeError, PankyIdentity, context_catalog, context_decision, governance_action, governance_inbox, issue_access_token, org_action_catalog
+from app.auth.panky_bridge import PankyBridgeError, PankyIdentity, context_catalog, context_decision, governance_action, governance_inbox, issue_access_token, org_action_catalog, org_action_decision
 from pydantic import BaseModel
 
 
@@ -127,8 +131,31 @@ def panky_org_action_catalog(request: Request):
         raise HTTPException(503, "Action catalog is unavailable") from None
 
 
+async def _connected_provider_operations(provider: str) -> list[str]:
+    """Derive operations from a live Gateway adapter, never from user input."""
+    if provider not in {"workspace", "n8n", "hubspot", "openwa",
+                        "acquisition", "agent_signals"}:
+        return []
+    tools = await MCPServer.list_tools(mcp_server)
+    names = [tool.name for tool in tools if _tool_provider(tool.name) == provider]
+    if not names:
+        return []
+    if provider == "hubspot" and not await get_hubspot_runtime().mcp_client.list_tools():
+        return []
+    if provider == "n8n" and not await get_n8n_client().list_tools(force_refresh=True):
+        return []
+    if provider == "openwa" and not await get_openwa_client().list_tools(force_refresh=True):
+        return []
+    if provider == "workspace" and not any(
+        source.status.value == "active" for source in get_runtime_gateway().registry.sources
+    ):
+        return []
+    return sorted({_panky_operation(name, provider, TOOL_CAPABILITIES.get(name))
+                   for name in names})
+
+
 @app.post("/panky/governance/action")
-def panky_governance_action(item: PankyGovernanceAction, request: Request):
+async def panky_governance_action(item: PankyGovernanceAction, request: Request):
     principal = getattr(request.state, "principal", None)
     if (principal is None or principal.type != "panky"
             or not principal.oidc_subject or not principal.oidc_email):
@@ -136,13 +163,31 @@ def panky_governance_action(item: PankyGovernanceAction, request: Request):
     if item.action not in {"share_request", "share_decide",
                            "founder_transfer_request", "founder_transfer_decide",
                            "super_admin_change", "resource_grant_request",
-                           "resource_grant_revoke", "resource_sharing"}:
+                           "resource_grant_revoke", "resource_sharing", "tool_register",
+                           "tool_retire", "resource_retire", "entity_retire"}:
         raise HTTPException(422, "Unsupported governance action")
     try:
+        identity = PankyIdentity("https://accounts.google.com",
+                                 principal.oidc_subject, principal.oidc_email)
+        data = item.data
+        if item.action == "tool_register":
+            if not org_action_decision(identity, "tool.register"):
+                return {"status": "denied", "reason": "not_available"}
+            provider = str(data.get("provider", "")).strip().casefold()
+            operations = await _connected_provider_operations(provider)
+            if not operations:
+                return {"status": "denied", "reason": "connector_unavailable"}
+            data = {"provider": provider, "operations": operations,
+                    "via_seat_id": data.get("via_seat_id"),
+                    "reason": data.get("reason", "")}
+        elif item.action == "tool_retire":
+            if not org_action_decision(identity, "tool.retire"):
+                return {"status": "denied", "reason": "not_available"}
+            data = {"provider": str(data.get("provider", "")).strip().casefold(),
+                    "via_seat_id": data.get("via_seat_id"),
+                    "reason": data.get("reason", "")}
         return governance_action(
-            PankyIdentity("https://accounts.google.com",
-                          principal.oidc_subject, principal.oidc_email),
-            item.action, item.data)
+            identity, item.action, data)
     except PankyBridgeError:
         raise HTTPException(503, "Governance is unavailable") from None
 

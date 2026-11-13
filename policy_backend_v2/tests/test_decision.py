@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from policy_backend_v2.decision import Request, decide
+from policy_backend_v2.decision import Request, decide, decide_via_seat
 from policy_backend_v2.publication import stable
 from policy_backend_v2.app import ActorProof, OrgActionRequest, decide_org_action
 
@@ -146,6 +146,8 @@ def test_tool_registration_requires_catalog_action_and_explicit_seat_grant():
     assert decide(data, Request("jorge", "org_action", action_id, "invoke"), NOW).reason == "super_admin"
     assert not decide(data, Request("dev", "org_action", action_id, "delete"), NOW).allowed
     assert not decide(data, Request("dev", "org_action", "invented-action", "invoke"), NOW).allowed
+    assert decide_via_seat(data, request, "s_dev", NOW).allowed
+    assert not decide_via_seat(data, request, "s_finance", NOW).allowed
 
 
 def test_unavailable_and_unknown_actions_have_same_public_answer():
