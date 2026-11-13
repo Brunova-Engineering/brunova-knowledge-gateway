@@ -284,7 +284,7 @@ def decide_org_action(item: OrgActionRequest, _: None = Depends(require_gateway)
                       database: PolicyStoreV2 = Depends(store)) -> dict:
     # The catalog is closed. Other organizational changes have their own
     # governance routes and cannot be opened by a generic decision request.
-    if item.action != "tool.register":
+    if item.action not in {"tool.register", "tool.retire"}:
         return {"allowed": False, "reason": "not_available"}
     try:
         actor_id = database.actor_for_oidc(item.actor.issuer, item.actor.email)
