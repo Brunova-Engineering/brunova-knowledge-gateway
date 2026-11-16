@@ -645,6 +645,44 @@ def test_exploration_map_preserves_output_arrays_and_direct_exploration_forwards
     assert len(calls) == call_count
 
 
+def test_chain_work_review_and_close_keep_the_gateway_as_a_bounded_portal_consumer(monkeypatch):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if request.method == "GET":
+            return httpx.Response(200, json={"focus": {"id": 7}, "reviews": [], "nextCursor": None})
+        return httpx.Response(202, json={"status": "recorded"})
+
+    configure(monkeypatch, handler)
+    focus = unpack(asyncio.run(mcp_server.call_tool("acquisition_get_chain_work_focus", {
+        "cycle_id": "cycle-1", "limit": 10})))
+    assert focus["data"]["focus"]["id"] == 7
+    assert calls[-1].url.path.endswith("/exploration/chain-work")
+    blocks = {step: {"status": "NO_ELIGIBLE", "reason": "No authorized work remains for this exact route", "receiptIds": []}
+              for step in ("contact", "fit", "discover", "investigate", "review", "select", "resolve")}
+    blocks["discover"] = {"status": "DONE", "reason": "Current discovery receipt for this exact link", "receiptIds": ["directive-1"]}
+    review = unpack(asyncio.run(mcp_server.call_tool("acquisition_record_chain_work_review", {
+        "command_id": "review-1", "cycle_id": "cycle-1", "focus_id": "7", "link_id": "link-1",
+        "expected_map_version": 12, "blocks": blocks,
+        "reason": "Every block was reviewed for this exact link with current evidence"})))
+    assert review["httpStatus"] == 202
+    assert calls[-1].url.path.endswith("/exploration/chain-work/reviews")
+    assert json.loads(calls[-1].content)["request"]["blocks"] == blocks
+    before = len(calls)
+    bad = blocks | {"discover": {"status": "DONE", "reason": "No receipt is available here", "receiptIds": []}}
+    assert asyncio.run(mcp_server.call_tool("acquisition_record_chain_work_review", {
+        "command_id": "review-bad", "cycle_id": "cycle-1", "focus_id": "7", "link_id": "link-1",
+        "expected_map_version": 12, "blocks": bad,
+        "reason": "Every block was reviewed for this exact link with current evidence"})).is_error
+    assert len(calls) == before
+    close = unpack(asyncio.run(mcp_server.call_tool("acquisition_close_chain_work_focus", {
+        "command_id": "close-1", "cycle_id": "cycle-1", "focus_id": "7",
+        "reason": "All links and company routes are complete and no unresolved work remains"})))
+    assert close["httpStatus"] == 202
+    assert calls[-1].url.path.endswith("/exploration/chain-work/close")
+
+
 def test_direct_exploration_forwards_governed_link_operations_and_rejects_missing_fields(monkeypatch):
     calls = []
 

@@ -37,7 +37,8 @@ TOOLS = frozenset({
     "acquisition_get_operating_model",
     "acquisition_get_activation_preflight",
     "acquisition_get_discovery",
-    "acquisition_get_exploration_map", "acquisition_direct_exploration", "acquisition_direct_candidate_enrichment",
+    "acquisition_get_exploration_map", "acquisition_direct_exploration", "acquisition_get_chain_work_focus",
+    "acquisition_record_chain_work_review", "acquisition_close_chain_work_focus", "acquisition_direct_candidate_enrichment",
     "acquisition_review_candidate_early_screening",
     "acquisition_review_candidate_enrichment_route",
     "acquisition_review_candidate_fit",
@@ -158,6 +159,48 @@ def register_acquisition_tools(server: Any) -> None:
             market: Literal["MX", "US"]) -> CallToolResult:
         """Read one market's current exploration map, company profiles, pending work and provenance. Call once for MX and once for US when both are needed; a combined map can exceed the bounded response. An UNVERIFIED lead is retained for follow-up and is not a verified supply-chain relationship."""
         return await portal_request("GET", "/exploration/map", params={"cycleId": cycle_id, "market": market})
+
+    @server.tool()
+    async def acquisition_get_chain_work_focus(cycle_id: Identifier,
+            cursor: Identifier | None = None,
+            limit: Annotated[int, Field(ge=1, le=50)] = 25) -> CallToolResult:
+        """Read the cycle's open supply-chain work focus and bounded review receipts. Map delivery does not close commercial work; use the cursor to inspect further reviews."""
+        params: dict[str, Any] = {"cycleId": cycle_id, "limit": limit}
+        if cursor is not None:
+            params["cursor"] = cursor
+        return await portal_request("GET", "/exploration/chain-work", params=params)
+
+    @server.tool()
+    async def acquisition_record_chain_work_review(command_id: Identifier, cycle_id: Identifier,
+            focus_id: Identifier, link_id: Identifier, expected_map_version: Annotated[int, Field(ge=1)],
+            blocks: dict[str, dict[str, Any]],
+            reason: Annotated[str, Field(min_length=20, max_length=1000)],
+            company_id: Identifier | None = None) -> CallToolResult:
+        """Record one current review of the seven published work blocks for a link or one company-link route. DONE needs exact receipt IDs; NO_ELIGIBLE needs a concrete reason; BLOCKED prevents chain closure. This records no contact or CRM effect."""
+        expected = {"contact", "fit", "discover", "investigate", "review", "select", "resolve"}
+        if set(blocks) != expected or any(
+            not isinstance(item, dict) or item.get("status") not in {"DONE", "NO_ELIGIBLE", "BLOCKED"}
+            or not isinstance(item.get("reason"), str) or not 20 <= len(item["reason"].strip()) <= 500
+            or not isinstance(item.get("receiptIds"), list) or len(item["receiptIds"]) > 12
+            or (item["status"] == "DONE" and not item["receiptIds"])
+            for item in blocks.values()
+        ):
+            raise ValueError("seven bounded block reviews are required")
+        request: dict[str, Any] = {"cycleId": cycle_id, "focusId": focus_id,
+            "linkId": link_id, "expectedMapVersion": expected_map_version,
+            "blocks": blocks, "reason": reason}
+        if company_id is not None:
+            request["companyId"] = company_id
+        return await portal_request("POST", "/exploration/chain-work/reviews", body={
+            "commandId": command_id, "request": request})
+
+    @server.tool()
+    async def acquisition_close_chain_work_focus(command_id: Identifier, cycle_id: Identifier,
+            focus_id: Identifier,
+            reason: Annotated[str, Field(min_length=40, max_length=1000)]) -> CallToolResult:
+        """Request commercial closure only after every focused link and company-link route has current, unblocked review receipts, both markets have exhausted exploration, and no work or reply remains unresolved. The Engine validates the gate and returns a receipt; map delivery alone never qualifies."""
+        return await portal_request("POST", "/exploration/chain-work/close", body={
+            "commandId": command_id, "request": {"cycleId": cycle_id, "focusId": focus_id, "reason": reason}})
 
     @server.tool()
     async def acquisition_direct_candidate_enrichment(
