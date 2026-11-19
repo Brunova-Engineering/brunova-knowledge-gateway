@@ -77,6 +77,9 @@ def test_management_projects_and_calls_openwa_write_without_approval(monkeypatch
     assert "approval_evidence" not in projected["openwa_MessageSendText"].input_schema.get("properties", {})
     assert "approval_reference_required" not in projected["openwa_MessageSendText"].meta
     assert "openwa_prepare_approval_reference" not in {tool.name for tool in catalog.tools}
+    assert "No approval_evidence, approval_reference" in projected["openwa_MessageSendText"].description
+    assert "No approval_evidence" not in projected["openwa_MessageHistory"].description
+    assert "do not require an additional approval reference" in mcp_module.mcp_server.instructions
     assert not read.is_error and not written.is_error and not legacy.is_error
     assert fake.calls == [("MessageHistory", {"sessionId": "safe-session"}),
                           ("MessageSendText", payload), ("MessageSendText", payload)]
