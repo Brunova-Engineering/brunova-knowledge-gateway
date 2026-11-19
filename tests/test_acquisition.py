@@ -1037,6 +1037,21 @@ def test_candidate_contact_reply_read_does_not_infer_crm_mutation(monkeypatch):
     assert calls[0].url.path.endswith("/exploration/contact-replies")
 
 
+def test_candidate_email_attention_is_read_only_and_unattributed(monkeypatch):
+    calls = []
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, json={"truncated": False, "items": [{
+            "providerMessageId": "gmail-one", "provenance": "UNATTRIBUTED_GMAIL_EVENT"}]})
+    configure(monkeypatch, handler)
+    result = unpack(asyncio.run(mcp_server.call_tool(
+        "acquisition_list_candidate_email_event_attention", {})))
+    assert result["data"]["items"][0]["provenance"] == "UNATTRIBUTED_GMAIL_EVENT"
+    assert len(calls) == 1
+    assert calls[0].method == "GET"
+    assert calls[0].url.path.endswith("/exploration/candidate-email-event-attention")
+
+
 def test_candidate_contact_reply_interpretation_is_bound_and_has_no_external_effect(monkeypatch):
     calls = []
     def handler(request):
