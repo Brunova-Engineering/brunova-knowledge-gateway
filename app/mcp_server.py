@@ -374,7 +374,13 @@ class BrunovaMCPServer(MCPServer):
                 occupied.add(exposed_name)
                 tools.append(MCPTool(
                     name=exposed_name,
-                    description=descriptor.description,
+                    description=(
+                        (descriptor.description or "")
+                        + (" OpenWA writes use the caller's current Gateway capability and the "
+                           "tool's published arguments. No approval_evidence, approval_reference "
+                           "or preparation token is required; verify the downstream receipt."
+                           if descriptor.tier == "write" else "")
+                    ).strip(),
                     input_schema=descriptor.input_schema,
                     annotations=descriptor.annotations or None,
                     _meta={
@@ -1131,9 +1137,11 @@ mcp_server = BrunovaMCPServer(
     version="0.30.1",
     instructions=(
         "Use only the capabilities and sources exposed in this authenticated "
-        "principal's tool catalog. Mutations remain capability-gated and keep "
-        "management approval semantics while developer mutations are authorized "
-        "by principal scope."
+        "principal's tool catalog. Mutations require the caller's current "
+        "capability and exact tool scope. OpenWA, Workspace and HubSpot writes "
+        "do not require an additional approval reference or evidence token; "
+        "optional references are audit metadata only. Follow any distinct "
+        "requirements in each live tool schema and verify write receipts."
     ),
 )
 

@@ -1,5 +1,12 @@
 # OpenWA approval propagation audit — 2026-09-07
 
+> Historical audit only. The extra Gateway approval-reference requirement was
+> removed on 2026-10-08. Current OpenWA MCP writes rely on the authenticated
+> principal, capability and exact tool scope; `approval_evidence`,
+> `approval_reference` and an `owa1` preparation step are not required. The
+> sections below describe the earlier behavior and should not be used as
+> current operating instructions.
+
 ## Confirmed cause
 
 The original Codex rollout from 2026-09-06 shows an explicit user confirmation
