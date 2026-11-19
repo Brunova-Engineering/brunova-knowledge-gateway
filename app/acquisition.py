@@ -38,6 +38,8 @@ TOOLS = frozenset({
     "acquisition_get_activation_preflight",
     "acquisition_get_discovery",
     "acquisition_get_exploration_map", "acquisition_direct_exploration", "acquisition_get_chain_work_focus",
+    "acquisition_list_unplaced_company_leads", "acquisition_capture_unplaced_company_lead",
+    "acquisition_propose_unplaced_company_placement",
     "acquisition_record_chain_work_review", "acquisition_close_chain_work_focus", "acquisition_direct_candidate_enrichment",
     "acquisition_review_candidate_early_screening",
     "acquisition_review_candidate_enrichment_route",
@@ -155,6 +157,48 @@ async def portal_request(method: str, path: str, *, params: dict | None = None,
 
 
 def register_acquisition_tools(server: Any) -> None:
+    @server.tool()
+    async def acquisition_list_unplaced_company_leads(cycle_id: Identifier,
+            limit: PageLimit = 100) -> CallToolResult:
+        """List bounded company leads saved without a supply-chain assignment. These are unverified intake records, not Accounts or active-chain candidates."""
+        return await portal_request("GET", "/exploration/unplaced-companies",
+                                    params={"cycleId": cycle_id, "limit": limit})
+
+    @server.tool()
+    async def acquisition_capture_unplaced_company_lead(command_id: Identifier, cycle_id: Identifier,
+            market: Literal["MX", "US"], name: Annotated[str, Field(min_length=3, max_length=200)],
+            source_note: Annotated[str, Field(min_length=12, max_length=1000)],
+            source_url: Annotated[str, Field(min_length=9, max_length=1000)] | None = None) -> CallToolResult:
+        """Record a sourced or explicitly unverified company lead without claiming it belongs to the focused chain. Deduplicated by cycle, market and normalized name. No stage advance, Account, CRM write or contact."""
+        request: dict[str, Any] = {"cycleId": cycle_id, "market": market, "name": name,
+                                   "sourceNote": source_note}
+        if source_url is not None:
+            parsed = urlsplit(source_url)
+            if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+                raise ValueError("HTTPS source required when supplied")
+            request["sourceUrl"] = source_url
+        return await portal_request("POST", "/exploration/unplaced-companies",
+                                    body={"commandId": command_id, "request": request})
+
+    @server.tool()
+    async def acquisition_propose_unplaced_company_placement(command_id: Identifier,
+            cycle_id: Identifier, lead_id: Annotated[str, Field(pattern=r"^[0-9]{1,18}$")],
+            expected_version: Annotated[int, Field(ge=1)],
+            chain_label: Annotated[str, Field(min_length=8, max_length=200)],
+            link_label: Annotated[str, Field(min_length=3, max_length=200)],
+            reason: Annotated[str, Field(min_length=20, max_length=1000)],
+            source_url: Annotated[str, Field(min_length=9, max_length=1000)]) -> CallToolResult:
+        """Propose an evidence-backed chain and link for one unplaced lead. This only annotates the intake record; it never opens a second active chain or changes commercial stage."""
+        parsed = urlsplit(source_url)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("attributed HTTPS source required")
+        return await portal_request("POST", "/exploration/unplaced-companies/placement",
+                                    body={"commandId": command_id, "request": {
+                                        "cycleId": cycle_id, "leadId": lead_id,
+                                        "expectedVersion": expected_version,
+                                        "chainLabel": chain_label, "linkLabel": link_label,
+                                        "reason": reason, "sourceUrl": source_url}})
+
     @server.tool()
     async def acquisition_get_exploration_map(cycle_id: Identifier,
             market: Literal["MX", "US"]) -> CallToolResult:
