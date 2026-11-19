@@ -50,6 +50,7 @@ TOOLS = frozenset({
     "acquisition_list_candidate_contact_attempts",
     "acquisition_list_candidate_browser_reply_targets",
     "acquisition_list_candidate_contact_replies",
+    "acquisition_list_candidate_email_event_attention",
     "acquisition_get_candidate_contact_reply",
     "acquisition_prepare_candidate_contact",
     "acquisition_interpret_candidate_contact_reply",
@@ -424,6 +425,11 @@ def register_acquisition_tools(server: Any) -> None:
     async def acquisition_list_candidate_contact_replies(cycle_id: Identifier) -> CallToolResult:
         """Read attributed inbound reply evidence and Panky's separate interpretation. No CRM transition is implied."""
         return await portal_request("GET", "/exploration/contact-replies", params={"cycleId": cycle_id})
+
+    @server.tool()
+    async def acquisition_list_candidate_email_event_attention() -> CallToolResult:
+        """Read opaque Gmail message IDs awaiting provenance review. These are not Engine-attributed replies or CRM evidence."""
+        return await portal_request("GET", "/exploration/candidate-email-event-attention")
 
     @server.tool()
     async def acquisition_get_candidate_contact_reply(

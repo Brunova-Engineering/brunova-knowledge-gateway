@@ -544,6 +544,7 @@ def test_mcp_exposes_only_governed_tools(monkeypatch):
             "acquisition_list_candidate_contact_attempts",
             "acquisition_list_candidate_browser_reply_targets",
             "acquisition_list_candidate_contact_replies",
+            "acquisition_list_candidate_email_event_attention",
             "acquisition_get_candidate_contact_reply",
             "acquisition_get_candidate_browser_dispatch",
             "acquisition_record_candidate_browser_dispatch_observation",
