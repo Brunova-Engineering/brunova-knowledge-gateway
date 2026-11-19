@@ -19,6 +19,36 @@ def configure(monkeypatch, handler):
     monkeypatch.setattr(acquisition.httpx, "AsyncClient", lambda **kwargs: client(transport=httpx.MockTransport(handler), **kwargs))
 
 
+def test_unplaced_company_tools_keep_intake_separate_from_chain_work(monkeypatch):
+    calls = []
+    def handler(request):
+        calls.append((request.method, request.url.path, json.loads(request.content) if request.content else None))
+        if request.method == "GET":
+            return httpx.Response(200, json={"leads": [{"id": "12", "name": "Refrisur",
+                "placementStatus": "UNPLACED"}], "truncated": False})
+        return httpx.Response(202, json={"status": "RECORDED" if len(calls) == 2 else "PROPOSED",
+                                          "leadId": "12", "version": len(calls) - 1})
+    configure(monkeypatch, handler)
+    cycle = "brunova-systems-cycle-1-20260912"
+    listed = unpack(asyncio.run(mcp_server.call_tool("acquisition_list_unplaced_company_leads",
+                                                    {"cycle_id": cycle})))
+    assert listed["httpStatus"] == 200
+    captured = unpack(asyncio.run(mcp_server.call_tool("acquisition_capture_unplaced_company_lead", {
+        "command_id": "capture-refrisur", "cycle_id": cycle, "market": "MX", "name": "Refrisur",
+        "source_note": "Jorge supplied this lead; its link is not yet verified."})))
+    assert captured["httpStatus"] == 202
+    proposed = unpack(asyncio.run(mcp_server.call_tool("acquisition_propose_unplaced_company_placement", {
+        "command_id": "place-refrisur", "cycle_id": cycle, "lead_id": "12", "expected_version": 1,
+        "chain_label": "Refrigerated distribution", "link_label": "Cold storage",
+        "reason": "Official company source supports cold storage, awaiting chain review.",
+        "source_url": "https://example.org/refrisur"})))
+    assert proposed["httpStatus"] == 202
+    assert [c[1] for c in calls] == ["/api/acquisition/v1/exploration/unplaced-companies",
+        "/api/acquisition/v1/exploration/unplaced-companies",
+        "/api/acquisition/v1/exploration/unplaced-companies/placement"]
+    assert "linkId" not in calls[1][2]["request"]
+
+
 def test_whatsapp_check_uses_read_only_lookup_once_and_records_exact_result(monkeypatch):
     calls = []
     class Client:
