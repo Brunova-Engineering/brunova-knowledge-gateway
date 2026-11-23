@@ -134,7 +134,7 @@ def panky_org_action_catalog(request: Request):
 async def _connected_provider_operations(provider: str) -> list[str]:
     """Derive operations from a live Gateway adapter, never from user input."""
     if provider not in {"workspace", "n8n", "hubspot", "openwa",
-                        "acquisition", "agent_signals"}:
+                        "acquisition", "presence", "agent_signals"}:
         return []
     tools = await MCPServer.list_tools(mcp_server)
     names = [tool.name for tool in tools if _tool_provider(tool.name) == provider]
