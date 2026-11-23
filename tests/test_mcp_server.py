@@ -5,6 +5,7 @@ from dataclasses import replace
 from unittest.mock import Mock
 
 from mcp import Client
+from app.presence import TOOLS as PRESENCE_TOOLS
 
 from app.adapters.google_workspace.models import (
     ArtifactMetadata,
@@ -646,7 +647,7 @@ def test_mcp_exposes_only_governed_tools(monkeypatch):
             "release_agent_signal",
             "agent_signal_status",
             "get_agent_signal_operation_history",
-    }
+    } | PRESENCE_TOOLS
     tab_tool_schemas = json.dumps(
         [
             tool.model_dump()

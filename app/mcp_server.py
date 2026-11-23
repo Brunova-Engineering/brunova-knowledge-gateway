@@ -22,6 +22,7 @@ from pydantic import BaseModel
 
 from app.acquisition import TOOLS as ACQUISITION_TOOLS
 from app.acquisition import register_acquisition_tools
+from app.presence import TOOLS as PRESENCE_TOOLS, register_presence_tools
 from app.adapters.google_workspace.errors import WorkspaceAdapterError
 from app.adapters.google_workspace.models import (
     ArtifactConversionTarget,
@@ -948,6 +949,18 @@ SIGNAL_WORKER_TOOLS = {
 }
 
 TOOL_CAPABILITIES: dict[str, str] = {
+    "presence_get_dashboard": "read",
+    "presence_list_ideas": "read",
+    "presence_list_drafts": "read",
+    "presence_list_interactions": "read",
+    "presence_list_ad_proposals": "read",
+    "presence_list_runs": "read",
+    "presence_add_idea": "create",
+    "presence_create_draft": "create",
+    "presence_record_interaction": "create",
+    "presence_propose_ad": "create",
+    "presence_start_run": "create",
+    "presence_finish_run": "update",
     "check_workspace_authorization": "read",
     "list_sources": "read",
     "resolve_source_artifact": "read",
@@ -1039,6 +1052,8 @@ def _panky_operation(name: str, provider: str, capability: str | None) -> str:
 
 
 def _tool_provider(name: str) -> str:
+    if name.startswith("presence_"):
+        return "presence"
     if name.startswith("acquisition_"):
         return "acquisition"
     if "agent_signal" in name:
@@ -1093,6 +1108,8 @@ def _tool_authorization_error(principal: Any, name: str) -> str | None:
         return None
     if name.startswith("acquisition_"):
         return None if principal.type == "management" and name in ACQUISITION_TOOLS else "tool_denied"
+    if name.startswith("presence_"):
+        return None if principal.type == "management" and name in PRESENCE_TOOLS else "tool_denied"
     if principal.type == "management":
         return None
     if principal.type == "signal_worker":
@@ -3489,6 +3506,7 @@ transport_security = TransportSecuritySettings(
 )
 
 register_acquisition_tools(mcp_server)
+register_presence_tools(mcp_server)
 
 mcp_http_app = mcp_server.streamable_http_app(
     streamable_http_path="/",
