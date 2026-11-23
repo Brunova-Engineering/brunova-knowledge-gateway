@@ -193,7 +193,7 @@ def register_presence_tools(server: Any) -> None:
             hypothesis: Annotated[str, Field(min_length=20, max_length=1000)],
             audience: Annotated[str, Field(min_length=10, max_length=500)],
             budget_cents: Annotated[int, Field(ge=1, le=1_000_000)]) -> CallToolResult:
-        """Propose amplification of a publication with a human-recorded receipt. Never create or modify an ad or spend."""
+        """Propose amplification only for a published post with a recorded URL and observed metrics. Never create or modify an ad or spend."""
         return await _request("POST", "/ad_proposals", {"commandId": command_id, "draftId": draft_id,
                     "hypothesis": hypothesis, "audience": audience, "budgetCents": budget_cents})
 
