@@ -21,6 +21,9 @@ TOOLS = frozenset({
     "presence_list_interactions", "presence_list_ad_proposals", "presence_list_runs",
     "presence_add_idea", "presence_create_draft", "presence_record_interaction",
     "presence_propose_ad", "presence_start_run", "presence_finish_run",
+    "presence_list_assets", "presence_list_calendar", "presence_list_metric_snapshots",
+    "presence_list_response_suggestions", "presence_add_asset", "presence_propose_calendar",
+    "presence_record_metrics", "presence_suggest_response",
 })
 
 
@@ -98,6 +101,26 @@ def register_presence_tools(server: Any) -> None:
         return await _request("GET", "/runs")
 
     @server.tool()
+    async def presence_list_assets() -> CallToolResult:
+        """List reviewed and pending creative assets with rights basis and source link."""
+        return await _request("GET", "/assets")
+
+    @server.tool()
+    async def presence_list_calendar() -> CallToolResult:
+        """Read proposed and human-reviewed editorial dates; a date does not publish content."""
+        return await _request("GET", "/calendar")
+
+    @server.tool()
+    async def presence_list_metric_snapshots() -> CallToolResult:
+        """Read sourced observations for published posts, not invented performance estimates."""
+        return await _request("GET", "/metric_snapshots")
+
+    @server.tool()
+    async def presence_list_response_suggestions() -> CallToolResult:
+        """Read proposed responses to attributed interactions; no tool sends a reply."""
+        return await _request("GET", "/response_suggestions")
+
+    @server.tool()
     async def presence_add_idea(command_id: Identifier, title: Annotated[str, Field(min_length=5, max_length=160)],
                                 angle: Annotated[str, Field(min_length=10, max_length=1000)],
                                 source_url: Annotated[str, Field(min_length=9, max_length=1200)],
@@ -108,7 +131,7 @@ def register_presence_tools(server: Any) -> None:
 
     @server.tool()
     async def presence_create_draft(command_id: Identifier, idea_id: Identifier,
-                                    platform: Literal["LINKEDIN", "INSTAGRAM", "TIKTOK", "FACEBOOK"],
+                                    platform: Literal["LINKEDIN", "INSTAGRAM", "TIKTOK", "FACEBOOK", "YOUTUBE"],
                                     risk: Literal["LOW", "MEDIUM", "HIGH"],
                                     body: Annotated[str, Field(min_length=20, max_length=6000)],
                                     visual_brief: Annotated[str, Field(max_length=1000)] | None = None) -> CallToolResult:
@@ -117,8 +140,47 @@ def register_presence_tools(server: Any) -> None:
                     "platform": platform, "risk": risk, "body": body, "visualBrief": visual_brief})
 
     @server.tool()
+    async def presence_add_asset(command_id: Identifier, draft_id: Identifier,
+            kind: Literal["IMAGE", "VIDEO", "SCREEN_CAPTURE"],
+            asset_url: Annotated[str, Field(min_length=9, max_length=1200)],
+            rights_basis: Literal["ORIGINAL", "LICENSED", "PUBLIC_DOMAIN", "PERMISSIONED"],
+            rights_note: Annotated[str, Field(min_length=10, max_length=1000)]) -> CallToolResult:
+        """Attach one saved creative asset to a draft with rights provenance for human review."""
+        return await _request("POST", "/assets", {"commandId": command_id, "draftId": draft_id,
+                    "kind": kind, "assetUrl": asset_url, "rightsBasis": rights_basis,
+                    "rightsNote": rights_note})
+
+    @server.tool()
+    async def presence_propose_calendar(command_id: Identifier, draft_id: Identifier,
+            proposed_for: Annotated[str, Field(min_length=20, max_length=40)],
+            rationale: Annotated[str, Field(min_length=10, max_length=1000)]) -> CallToolResult:
+        """Propose a future UTC publication date for human review; this never schedules a platform post."""
+        return await _request("POST", "/calendar", {"commandId": command_id, "draftId": draft_id,
+                    "proposedFor": proposed_for, "rationale": rationale})
+
+    @server.tool()
+    async def presence_record_metrics(command_id: Identifier, draft_id: Identifier,
+            observed_at: Annotated[str, Field(min_length=20, max_length=40)],
+            source_url: Annotated[str, Field(min_length=9, max_length=1200)],
+            impressions: Annotated[int, Field(ge=0)], views: Annotated[int, Field(ge=0)],
+            comments: Annotated[int, Field(ge=0)], shares: Annotated[int, Field(ge=0)],
+            saves: Annotated[int, Field(ge=0)], clicks: Annotated[int, Field(ge=0)]) -> CallToolResult:
+        """Record observed platform metrics for a published post with a source URL; never infer missing counts."""
+        return await _request("POST", "/metric_snapshots", {"commandId": command_id, "draftId": draft_id,
+                    "observedAt": observed_at, "sourceUrl": source_url, "impressions": impressions,
+                    "views": views, "comments": comments, "shares": shares, "saves": saves, "clicks": clicks})
+
+    @server.tool()
+    async def presence_suggest_response(command_id: Identifier, interaction_id: Identifier,
+            body: Annotated[str, Field(min_length=10, max_length=3000)],
+            rationale: Annotated[str, Field(min_length=10, max_length=1000)]) -> CallToolResult:
+        """Draft a contextual answer to one recorded interaction for human review; never post it."""
+        return await _request("POST", "/response_suggestions", {"commandId": command_id,
+                    "interactionId": interaction_id, "body": body, "rationale": rationale})
+
+    @server.tool()
     async def presence_record_interaction(command_id: Identifier,
-            platform: Literal["LINKEDIN", "INSTAGRAM", "TIKTOK", "FACEBOOK"],
+            platform: Literal["LINKEDIN", "INSTAGRAM", "TIKTOK", "FACEBOOK", "YOUTUBE"],
             external_url: Annotated[str, Field(min_length=9, max_length=1200)],
             summary: Annotated[str, Field(min_length=10, max_length=2000)],
             explicit_interest: bool = False) -> CallToolResult:
