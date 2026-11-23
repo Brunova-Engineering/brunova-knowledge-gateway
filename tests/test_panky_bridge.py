@@ -20,6 +20,13 @@ from mcp.types import Tool as MCPTool
 from app.source_registry import SourceDefinition, SourceRegistry, SourceRegistryDocument
 
 
+def test_presence_provider_can_be_registered_from_live_tools():
+    from app.main import _connected_provider_operations
+
+    operations = asyncio.run(_connected_provider_operations("presence"))
+    assert operations == ["create", "read", "update"]
+
+
 def test_legacy_management_token_is_unchanged_when_bridge_is_on(monkeypatch):
     monkeypatch.setenv("PANKY_POLICY_MODE", "shadow")
     authenticator = GatewayPrincipalAuthenticator(PrincipalResolver("legacy-secret", ()))
