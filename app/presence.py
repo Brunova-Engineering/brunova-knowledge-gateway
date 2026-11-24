@@ -22,6 +22,7 @@ TOOLS = frozenset({
     "presence_add_idea", "presence_create_draft", "presence_record_interaction",
     "presence_propose_ad", "presence_start_run", "presence_finish_run",
     "presence_list_assets", "presence_list_calendar", "presence_list_metric_snapshots",
+    "presence_list_channel_snapshots", "presence_record_channel_snapshot",
     "presence_list_response_suggestions", "presence_add_asset", "presence_propose_calendar",
     "presence_record_metrics", "presence_suggest_response",
 })
@@ -116,6 +117,11 @@ def register_presence_tools(server: Any) -> None:
         return await _request("GET", "/metric_snapshots")
 
     @server.tool()
+    async def presence_list_channel_snapshots() -> CallToolResult:
+        """Read dated, sourced account baselines; these are not post performance metrics."""
+        return await _request("GET", "/channel_snapshots")
+
+    @server.tool()
     async def presence_list_response_suggestions() -> CallToolResult:
         """Read proposed responses to attributed interactions; no tool sends a reply."""
         return await _request("GET", "/response_suggestions")
@@ -169,6 +175,19 @@ def register_presence_tools(server: Any) -> None:
         return await _request("POST", "/metric_snapshots", {"commandId": command_id, "draftId": draft_id,
                     "observedAt": observed_at, "sourceUrl": source_url, "impressions": impressions,
                     "views": views, "comments": comments, "shares": shares, "saves": saves, "clicks": clicks})
+
+    @server.tool()
+    async def presence_record_channel_snapshot(command_id: Identifier,
+            platform: Literal["LINKEDIN", "INSTAGRAM", "TIKTOK", "FACEBOOK", "YOUTUBE"],
+            observed_at: Annotated[str, Field(min_length=20, max_length=40)],
+            source_url: Annotated[str, Field(min_length=9, max_length=1200)],
+            followers: Annotated[int, Field(ge=0)],
+            source_note: Annotated[str, Field(min_length=10, max_length=1000)],
+            published_posts: Annotated[int, Field(ge=0)] | None = None) -> CallToolResult:
+        """Record a visibly observed account baseline with source and time; never infer missing counts."""
+        return await _request("POST", "/channel_snapshots", {"commandId": command_id,
+                    "platform": platform, "observedAt": observed_at, "sourceUrl": source_url,
+                    "followers": followers, "publishedPosts": published_posts, "sourceNote": source_note})
 
     @server.tool()
     async def presence_suggest_response(command_id: Identifier, interaction_id: Identifier,
