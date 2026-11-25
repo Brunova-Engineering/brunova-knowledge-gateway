@@ -1,6 +1,7 @@
 """A Core publication waits for POC repository transport readback."""
 
 import pytest
+from types import SimpleNamespace
 
 from policy_backend_v2 import repository_publication as publication
 
@@ -21,6 +22,14 @@ def _topology(new=False):
     return {"nodes": nodes}
 
 
+def _policy(new=False, archived=False):
+    nodes = [SimpleNamespace(node_id="ctx_brunova", lifecycle="active")]
+    if new:
+        nodes.append(SimpleNamespace(node_id="ctx_new",
+                                     lifecycle="archived" if archived else "active"))
+    return SimpleNamespace(context_nodes=nodes)
+
+
 class _Client:
     def __init__(self, **kwargs):
         self.options = kwargs
@@ -35,7 +44,7 @@ class _Client:
 def test_no_new_backing_needs_no_publisher_credential(monkeypatch):
     monkeypatch.setattr(publication, "_previous_topology", lambda _: _topology())
     monkeypatch.delenv("PANKY_REPOSITORY_GITHUB_TOKEN", raising=False)
-    assert publication.provision_new_repositories("unused", _topology()) == {
+    assert publication.provision_new_repositories("unused", _policy(), _topology()) == {
         "created_or_verified": [], "status": "no_change"}
 
 
@@ -44,7 +53,15 @@ def test_new_backing_requires_publisher_credential(monkeypatch):
     monkeypatch.delenv("PANKY_REPOSITORY_GITHUB_TOKEN", raising=False)
     with pytest.raises(publication.RepositoryPublicationUnavailable,
                        match="credential is unavailable"):
-        publication.provision_new_repositories("unused", _topology(new=True))
+        publication.provision_new_repositories("unused", _policy(new=True), _topology(new=True))
+
+
+def test_archived_policy_node_never_triggers_repository_creation(monkeypatch):
+    monkeypatch.setattr(publication, "_previous_topology", lambda _: _topology())
+    monkeypatch.delenv("PANKY_REPOSITORY_GITHUB_TOKEN", raising=False)
+    assert publication.provision_new_repositories(
+        "unused", _policy(new=True, archived=True), _topology(new=True)
+    ) == {"created_or_verified": [], "status": "no_change"}
 
 
 def test_new_backing_is_verified_before_publication(monkeypatch):
@@ -56,7 +73,8 @@ def test_new_backing_is_verified_before_publication(monkeypatch):
                         lambda client, **kw: observed.append(("create", kw)))
     monkeypatch.setattr(publication, "verify_effective_access",
                         lambda client, **kw: observed.append(("verify", kw)))
-    receipt = publication.provision_new_repositories("unused", _topology(new=True))
+    receipt = publication.provision_new_repositories("unused", _policy(new=True),
+                                                   _topology(new=True))
     assert receipt == {"created_or_verified": ["Pancracio-s/pancracio-node-new"],
                        "status": "verified"}
     assert [entry[0] for entry in observed] == ["create", "verify"]
@@ -77,5 +95,6 @@ def test_failed_github_readback_keeps_release_unpublished(monkeypatch):
     monkeypatch.setattr(publication, "verify_effective_access", fail)
     with pytest.raises(publication.RepositoryPublicationUnavailable,
                        match="provisioning is incomplete") as exc:
-        publication.provision_new_repositories("unused", _topology(new=True))
+        publication.provision_new_repositories("unused", _policy(new=True),
+                                             _topology(new=True))
     assert "private GitHub detail" not in str(exc.value)

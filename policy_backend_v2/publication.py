@@ -124,7 +124,7 @@ def _node_repository(core_node: dict) -> dict:
 
 def activate(dsn: str, policy: Policy, registry: dict, topology: dict,
              core_commit: str, publisher: str = "github_actions",
-             repository_provisioner: Callable[[str, dict], dict] | None = None) -> str:
+             repository_provisioner: Callable[[str, Policy, dict], dict] | None = None) -> str:
     if len(core_commit) != 40 or any(c not in "0123456789abcdef" for c in core_commit):
         raise ValueError("Full lowercase Core commit required")
     verify_core(policy, registry, topology)
@@ -494,7 +494,7 @@ def activate(dsn: str, policy: Policy, registry: dict, topology: dict,
         # before this transaction can activate the next projection. Failures
         # leave the old Policy release active; retries reuse the exact repo.
         if repository_provisioner is not None:
-            repository_provisioner(dsn, topology)
+            repository_provisioner(dsn, policy, topology)
         conn.execute("UPDATE panky_actors SET founder=false")
         for actor in policy.actors:
             record = registry.get("actors", registry)[actor.actor_id]

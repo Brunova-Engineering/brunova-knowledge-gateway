@@ -113,8 +113,8 @@ def test_failed_repository_provisioning_preserves_active_release(db):
     first = activate(db, policy, registry, topology, "f" * 40)
     called = []
 
-    def unavailable(dsn, candidate):
-        called.append((dsn, candidate))
+    def unavailable(dsn, candidate_policy, candidate_topology):
+        called.append((dsn, candidate_policy, candidate_topology))
         raise RuntimeError("GitHub publisher unavailable")
 
     with pytest.raises(RuntimeError, match="publisher unavailable"):

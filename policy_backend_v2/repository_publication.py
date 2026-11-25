@@ -12,6 +12,7 @@ import httpx
 import psycopg
 
 from .github_repository_lifecycle import ensure_private_repository, verify_effective_access
+from .models import Policy
 from .repository_lifecycle import plan_repository_lifecycle
 
 
@@ -59,19 +60,28 @@ def _marker(node_id: str, node: dict) -> tuple[str, dict]:
     }
 
 
-def provision_new_repositories(dsn: str, topology: dict) -> dict:
+def provision_new_repositories(dsn: str, policy: Policy, topology: dict) -> dict:
     """Fail closed until each newly bound private repository is readable."""
     previous = _previous_topology(dsn)
     if previous is None:
         return {"created_or_verified": [], "status": "initial_technical_setup"}
-    plan = plan_repository_lifecycle(previous, topology)
+    # The registry retains archived policy nodes whose topology backing may
+    # still say ACTIVE for historical materialization. Only effective active
+    # policy nodes may cause a GitHub write.
+    active_ids = {node.node_id for node in policy.context_nodes
+                  if node.lifecycle == "active"}
+    eligible = {"nodes": {node_id: node for node_id, node in topology["nodes"].items()
+                          if node_id in active_ids}}
+    if set(eligible["nodes"]) != active_ids:
+        raise RepositoryPublicationUnavailable("active policy node has no Core backing")
+    plan = plan_repository_lifecycle(previous, eligible)
     if not plan.grants:
         return {"created_or_verified": [], "status": "no_change"}
     token = os.getenv("PANKY_REPOSITORY_GITHUB_TOKEN", "").strip()
     if not token:
         raise RepositoryPublicationUnavailable("repository publisher credential is unavailable")
     by_repository = {}
-    for node_id, node in topology["nodes"].items():
+    for node_id, node in eligible["nodes"].items():
         if str(node.get("lifecycle", "ACTIVE")).upper() != "ACTIVE":
             continue
         repository = node["backing_bindings"][0]["repository"]
