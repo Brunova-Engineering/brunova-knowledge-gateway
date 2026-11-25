@@ -108,6 +108,27 @@ def test_same_active_core_commit_can_retry_publication_safely(db):
         assert conn.execute("SELECT count(*) FROM panky_policy_releases").fetchone()[0] == 1
 
 
+def test_failed_repository_provisioning_preserves_active_release(db):
+    policy, registry, topology = example()
+    first = activate(db, policy, registry, topology, "f" * 40)
+    called = []
+
+    def unavailable(dsn, candidate):
+        called.append((dsn, candidate))
+        raise RuntimeError("GitHub publisher unavailable")
+
+    with pytest.raises(RuntimeError, match="publisher unavailable"):
+        activate(db, policy, registry, topology, "e" * 40,
+                 repository_provisioner=unavailable)
+
+    assert len(called) == 1
+    with psycopg.connect(db) as conn:
+        assert conn.execute(
+            "SELECT release_id FROM panky_policy_releases WHERE status='active'"
+        ).fetchone()[0].hex == first.replace("-", "")
+        assert conn.execute("SELECT count(*) FROM panky_policy_releases").fetchone()[0] == 1
+
+
 def test_action_catalog_is_scoped_and_delegation_is_published(db):
     policy, registry, topology = example()
     payload = policy.model_dump(mode="python")
