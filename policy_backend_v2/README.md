@@ -50,3 +50,23 @@ governed recovery path until they reach READY on 2.2.
   Actor denials apply across all Seats. Limited-use grants reserve atomically.
 - Operational rows are a projection. Natural-language role descriptions and
   Knowledge files do not grant permissions.
+
+## Brunova POC repository provisioning
+
+For a newly approved organizational Context Graph node, the Policy publisher
+creates its private backing repository in `Pancracio-s`, writes the node marker,
+and verifies access for the POC transport login `jorgeaveraf` **before** the
+new Core projection becomes active. An existing repository is adopted only if
+its private visibility and marker already match. A failed check preserves the
+previous active release; a retry reuses the same repository.
+
+Set `PANKY_REPOSITORY_GITHUB_TOKEN` only on the Policy service, using a
+server-side secret. The token needs access to `Pancracio-s` with repository
+Administration and Contents write permissions. Never put it in a kit, client
+Workspace, Core commit, or an Actor's computer. The publisher checks that the
+organization's base repository permission is `none`; GitHub access is only
+transport and does not grant a Panky Context View decision. This POC route
+does not ask Nat or Ilian for GitHub accounts.
+
+This hook provisions backings named in a protected Core release. It does not
+itself create the Actor, Seat, department, or approval that introduces a node.

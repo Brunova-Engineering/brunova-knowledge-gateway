@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Callable
 from uuid import UUID, uuid4, uuid5
 
 import psycopg
@@ -122,7 +123,8 @@ def _node_repository(core_node: dict) -> dict:
 
 
 def activate(dsn: str, policy: Policy, registry: dict, topology: dict,
-             core_commit: str, publisher: str = "github_actions") -> str:
+             core_commit: str, publisher: str = "github_actions",
+             repository_provisioner: Callable[[str, dict], dict] | None = None) -> str:
     if len(core_commit) != 40 or any(c not in "0123456789abcdef" for c in core_commit):
         raise ValueError("Full lowercase Core commit required")
     verify_core(policy, registry, topology)
@@ -487,6 +489,12 @@ def activate(dsn: str, policy: Policy, registry: dict, topology: dict,
                         admin=approval[2] != owner[0]):
                     raise ValueError("Resource grant revocation approval is stale")
                 approved_resource_grants.append(approval[0])
+        # Governance approvals were checked against the still-active release.
+        # A new backing must be private, marked, and usable by the POC transport
+        # before this transaction can activate the next projection. Failures
+        # leave the old Policy release active; retries reuse the exact repo.
+        if repository_provisioner is not None:
+            repository_provisioner(dsn, topology)
         conn.execute("UPDATE panky_actors SET founder=false")
         for actor in policy.actors:
             record = registry.get("actors", registry)[actor.actor_id]

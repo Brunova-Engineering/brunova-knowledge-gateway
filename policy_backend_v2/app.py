@@ -16,6 +16,7 @@ from policy_backend.service_auth import (require_core_workflow_v2,
 from .decision import Request
 from .models import Policy
 from .publication import activate, stable
+from .repository_publication import provision_new_repositories
 from .store import PolicyStoreV2
 from .governance import GovernanceStore
 
@@ -545,7 +546,8 @@ def publish(item: Publication, claims: dict = Depends(require_core_workflow_v2),
         topology = yaml.safe_load(item.topology_yaml)
         topology["_seats"] = yaml.safe_load(item.seats_yaml)["seats"]
         release = activate(database.dsn, item.policy, registry, topology,
-                           item.core_commit)
+                           item.core_commit,
+                           repository_provisioner=provision_new_repositories)
         return {"release_id": release, "core_commit": item.core_commit}
     except (ValueError, KeyError, TypeError, yaml.YAMLError):
         raise HTTPException(422, "Core policy publication is invalid") from None
