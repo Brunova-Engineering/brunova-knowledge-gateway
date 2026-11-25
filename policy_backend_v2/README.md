@@ -62,7 +62,8 @@ previous active release; a retry reuses the same repository.
 
 Set `PANKY_REPOSITORY_GITHUB_TOKEN` only on the Policy service, using a
 server-side secret. The token needs access to `Pancracio-s` with repository
-Administration and Contents write permissions. Never put it in a kit, client
+Administration and Contents write permissions plus organization Administration
+read permission to inspect the base access policy. Never put it in a kit, client
 Workspace, Core commit, or an Actor's computer. The publisher checks that the
 organization's base repository permission is `none`; GitHub access is only
 transport and does not grant a Panky Context View decision. This POC route
